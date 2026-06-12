@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DOOMSTARE — camera vitals</title>
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #131826;
+    --panel2: #1a2133;
+    --text: #e6edf3;
+    --dim: #7d8aa5;
+    --accent: #ff4d6d;
+    --good: #3ddc84;
+    --warn: #ffb340;
+    --bad: #ff5252;
+    --blue: #4dabff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "SF Mono", ui-monospace, Menlo, monospace;
+    min-height: 100vh;
+    padding: 24px;
+  }
+  header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 20px; }
+  h1 { font-size: 28px; letter-spacing: 4px; }
+  h1 .eye { color: var(--accent); }
+  #status { font-size: 13px; color: var(--dim); }
+  #status.live { color: var(--good); }
+  .grid { display: grid; grid-template-columns: minmax(420px, 1.2fr) 1fr; gap: 20px; max-width: 1280px; }
+  .panel { background: var(--panel); border: 1px solid #232c44; border-radius: 14px; padding: 18px; }
+  .cam { position: relative; overflow: hidden; padding: 0; }
+  .cam img { display: block; width: 100%; border-radius: 14px; }
+  .cam .overlay {
+    position: absolute; top: 12px; left: 12px; right: 12px;
+    display: flex; justify-content: space-between; pointer-events: none;
+  }
+  .chip {
+    background: rgba(11,14,20,.72); border: 1px solid #2c3654; border-radius: 8px;
+    padding: 6px 12px; font-size: 13px; backdrop-filter: blur(4px);
+  }
+  .stack { display: flex; flex-direction: column; gap: 20px; }
+  .metric-row { display: flex; align-items: baseline; gap: 12px; }
+  .metric-label { font-size: 12px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; }
+  .big { font-size: 56px; font-weight: 700; line-height: 1; }
+  .unit { font-size: 16px; color: var(--dim); }
+  .heart { display: inline-block; color: var(--accent); font-size: 40px; transform-origin: center; }
+  .heart.beat { animation: beat .25s ease-out; }
+  @keyframes beat { 0% {transform: scale(1);} 35% {transform: scale(1.35);} 100% {transform: scale(1);} }
+  canvas { width: 100%; height: 110px; display: block; margin-top: 10px; }
+  .sub { font-size: 13px; color: var(--dim); margin-top: 6px; }
+  .fatigue-bar { height: 10px; border-radius: 5px; background: var(--panel2); margin-top: 12px; overflow: hidden; }
+  .fatigue-fill { height: 100%; width: 0%; border-radius: 5px; background: var(--good); transition: width .5s, background .5s; }
+  #fatigue-status { margin-top: 10px; font-size: 15px; }
+  .blink-flash { color: var(--blue); }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .small-big { font-size: 36px; font-weight: 700; }
+  .stale { opacity: .35; }
+  #doom-alert {
+    display: none; margin-top: 12px; padding: 10px 14px; border-radius: 8px;
+    background: rgba(255,82,82,.12); border: 1px solid var(--bad); color: var(--bad);
+    font-size: 14px; animation: pulse-bg 1s infinite alternate;
+  }
+  @keyframes pulse-bg { from { background: rgba(255,82,82,.08);} to { background: rgba(255,82,82,.22);} }
+</style>
+</head>
+<body>
+<header>
+  <h1>D<span class="eye">👁</span><span class="eye">👁</span>MSTARE</h1>
+  <div id="status">connecting…</div>
+</header>
+
+<div class="grid">
+  <div class="panel cam">
+    <img id="preview" src="/stream" alt="camera preview">
+    <div class="overlay">
+      <span class="chip" id="chip-bpm">♥ -- bpm</span>
+      <span class="chip" id="chip-blink">👁 awaiting blink</span>
+    </div>
+  </div>
+
+  <div class="stack">
+    <div class="panel">
+      <div class="metric-label">Pulse rate</div>
+      <div class="metric-row">
+        <span class="heart" id="heart">♥</span>
+        <span class="big" id="bpm">--</span><span class="unit">bpm</span>
+      </div>
+      <canvas id="wave"></canvas>
+      <div class="sub" id="bpm-sub">waiting for signal…</div>
+    </div>
+
+    <div class="panel">
+      <div class="metric-label">Blink fatigue meter</div>
+      <div class="metric-row">
+        <span class="big" id="blinkrate">--</span><span class="unit">blinks/min</span>
+        <span class="sub" style="margin-left:auto">last blink <b id="sinceblink">--</b>s ago</span>
+      </div>
+      <div class="fatigue-bar"><div class="fatigue-fill" id="fatigue-fill"></div></div>
+      <div id="fatigue-status">calibrating…</div>
+      <div id="doom-alert">⚠ DOOMSTARE DETECTED — you stopped blinking. Blink! Look away! Hydrate!</div>
+    </div>
+
+    <div class="row2">
+      <div class="panel">
+        <div class="metric-label">Breathing</div>
+        <div class="metric-row"><span class="small-big" id="br">--</span><span class="unit">breaths/min</span></div>
+      </div>
+      <div class="panel">
+        <div class="metric-label">Session</div>
+        <div class="metric-row"><span class="small-big" id="blinktotal">0</span><span class="unit">total blinks</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const wave = $('wave');
+const ctx = wave.getContext('2d');
+let trace = [];           // recent pulse-trace samples {t, v}
+const TRACE_SECONDS = 8;
+let lastBeatPulse = 0;
+
+function drawWave() {
+  const w = wave.width = wave.clientWidth * devicePixelRatio;
+  const h = wave.height = wave.clientHeight * devicePixelRatio;
+  ctx.clearRect(0, 0, w, h);
+  if (trace.length < 2) { requestAnimationFrame(drawWave); return; }
+  const tEnd = trace[trace.length - 1].t;
+  const tStart = tEnd - TRACE_SECONDS;
+  const vis = trace.filter(p => p.t >= tStart);
+  let lo = Infinity, hi = -Infinity;
+  for (const p of vis) { lo = Math.min(lo, p.v); hi = Math.max(hi, p.v); }
+  if (hi - lo < 1e-6) { hi = lo + 1; }
+  ctx.beginPath();
+  ctx.strokeStyle = '#ff4d6d';
+  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.lineJoin = 'round';
+  vis.forEach((p, i) => {
+    const x = ((p.t - tStart) / TRACE_SECONDS) * w;
+    const y = h - ((p.v - lo) / (hi - lo)) * (h * 0.8) - h * 0.1;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  requestAnimationFrame(drawWave);
+}
+requestAnimationFrame(drawWave);
+
+// beat the heart at the live BPM
+let bpmNow = 0;
+setInterval(() => {
+  if (bpmNow > 30) {
+    $('heart').classList.remove('beat');
+    void $('heart').offsetWidth;
+    $('heart').classList.add('beat');
+  }
+}, 1000); // re-armed dynamically below
+function armHeartbeat() {
+  if (bpmNow > 30) {
+    $('heart').classList.remove('beat');
+    void $('heart').offsetWidth;
+    $('heart').classList.add('beat');
+    setTimeout(armHeartbeat, 60000 / bpmNow);
+  } else {
+    setTimeout(armHeartbeat, 500);
+  }
+}
+armHeartbeat();
+
+const es = new EventSource('/events');
+es.onopen = () => { $('status').textContent = '● live'; $('status').classList.add('live'); };
+es.onerror = () => { $('status').textContent = 'reconnecting…'; $('status').classList.remove('live'); };
+es.onmessage = e => {
+  const m = JSON.parse(e.data);
+
+  if (m.bpm > 0) {
+    bpmNow = m.bpm;
+    $('bpm').textContent = Math.round(m.bpm);
+    $('chip-bpm').textContent = `♥ ${Math.round(m.bpm)} bpm`;
+    $('bpm-sub').textContent = m.bpm_stable ? 'signal stable' : 'stabilizing — hold still, good light helps';
+    $('bpm').classList.toggle('stale', !m.bpm_stable);
+  }
+  if (m.br > 0) $('br').textContent = Math.round(m.br);
+
+  if (m.trace && m.trace.length) {
+    for (const [t, v] of m.trace) trace.push({ t, v });
+    const cutoff = trace[trace.length - 1].t - TRACE_SECONDS - 2;
+    while (trace.length && trace[0].t < cutoff) trace.shift();
+  }
+
+  // blink metrics
+  $('blinktotal').textContent = m.blink_total;
+  if (m.blinks_per_min >= 0) $('blinkrate').textContent = m.blinks_per_min.toFixed(1);
+  if (m.sec_since_blink >= 0) {
+    $('sinceblink').textContent = m.sec_since_blink.toFixed(0);
+    $('chip-blink').textContent = m.blink_now ? '👁 blink!' : `👁 ${m.sec_since_blink.toFixed(0)}s since blink`;
+    $('chip-blink').classList.toggle('blink-flash', m.blink_now);
+  }
+
+  // fatigue logic: healthy spontaneous blink rate ~12-20/min.
+  // Doomstare = long gaps between blinks. Score 0 (fresh) .. 100 (fried).
+  if (m.blinks_per_min >= 0 && m.calibrated) {
+    const gapScore = Math.min(1, Math.max(0, (m.sec_since_blink - 5) / 15));
+    const rateScore = Math.min(1, Math.max(0, (12 - m.blinks_per_min) / 12));
+    const fatigue = Math.round(100 * Math.max(gapScore, rateScore * 0.8));
+    const fill = $('fatigue-fill');
+    fill.style.width = fatigue + '%';
+    fill.style.background = fatigue < 35 ? 'var(--good)' : fatigue < 70 ? 'var(--warn)' : 'var(--bad)';
+    const label =
+      fatigue < 35 ? '😌 healthy blinking — eyes are happy' :
+      fatigue < 70 ? '😐 blink rate dropping — screen trance forming' :
+                     '🫠 eyes drying out';
+    $('fatigue-status').textContent = `fatigue ${fatigue}/100 — ${label}`;
+    $('doom-alert').style.display = m.sec_since_blink > 15 ? 'block' : 'none';
+  }
+};
+</script>
+</body>
+</html>
