@@ -576,11 +576,11 @@ std::string GameJsonLocked(double now) {
                                                       : 0;
     snprintf(buf, sizeof(buf),
              "\"phase\":\"%s\",\"player\":\"%s\",\"countdown\":%.1f,\"stare_t\":%.2f,"
-             "\"score\":%.2f,\"rank\":%d,\"best\":%.2f,\"avatar\":\"%s\","
+             "\"score\":%.2f,\"rank\":%d,\"best\":%.2f,\"players\":%zu,\"avatar\":\"%s\","
              "\"reason\":\"%s\",\"face\":%s,"
              "\"blink_ago\":%.2f,\"hint\":\"%s\"",
              PhaseName(g.phase), JsonEscape(g.player).c_str(), countdown_left, stare_t,
-             g.final_score, g.final_rank, g.final_best, g.final_avatar.c_str(),
+             g.final_score, g.final_rank, g.final_best, g.board.size(), g.final_avatar.c_str(),
              g.end_reason.c_str(), now - g.face_t < kFaceFreshSeconds ? "true" : "false",
              g.last_blink_t < 0 ? -1.0 : now - g.last_blink_t, JsonEscape(g.hint).c_str());
     return buf;
