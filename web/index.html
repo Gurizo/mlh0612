@@ -9,6 +9,7 @@
     --bg: #0b0e14; --panel: #131826; --panel2: #1a2133; --border: #232c44;
     --text: #e6edf3; --dim: #7d8aa5;
     --accent: #ff4d6d; --good: #3ddc84; --warn: #ffb340; --bad: #ff5252; --blue: #4dabff;
+    --rank1: #f5c518; --rank2: #c4cdd9; --rank3: #cd8c52;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
   body {
@@ -39,34 +40,68 @@
   }
   button:disabled { opacity: .45; }
   button.ghost { background: var(--panel2); color: var(--dim); font-weight: 400; letter-spacing: 0; }
-  /* leaderboard card (trophy.so-style rows) */
-  .lb { display: flex; flex-direction: column; gap: 6px; }
-  .lb-row {
-    display: flex; align-items: center; gap: 12px;
-    padding: 10px 12px; border-radius: 12px; background: var(--panel2);
-    border: 1px solid transparent; transition: transform .12s;
-  }
-  .lb-row.me { border-color: var(--accent); background: rgba(255,77,109,.10); }
-  .lb-rank {
-    flex: 0 0 32px; height: 32px; border-radius: 50%;
+  /* leaderboard — modeled on trophy.so's LeaderboardCard (podium + rankings) */
+  .lb-head { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
+  .lb-title { font-size: 20px; font-weight: 700; letter-spacing: 1px; }
+  .lb-range { font-size: 12px; color: var(--dim); margin-top: 3px; }
+
+  /* podium (top 3, reordered 2-1-3) */
+  .podium { display: flex; align-items: flex-end; justify-content: center; gap: 10px; margin-bottom: 20px; }
+  .podium:empty { display: none; }
+  .podium-col { display: flex; flex-direction: column; align-items: center; flex: 1 1 0; max-width: 116px; min-width: 0; }
+  .podium-ava {
+    position: relative; width: 56px; height: 56px; border-radius: 50%; overflow: hidden;
+    background: #0d1018; border: 2px solid var(--border);
     display: flex; align-items: center; justify-content: center;
-    font-size: 14px; font-weight: 700; color: var(--dim);
-    background: #0d1018; border: 1px solid var(--border);
   }
-  .lb-row.r1 .lb-rank { background: linear-gradient(145deg,#ffe07a,#e0a200); color: #2a1d00; border: 0; }
-  .lb-row.r2 .lb-rank { background: linear-gradient(145deg,#e8edf5,#9aa6bd); color: #1a2030; border: 0; }
-  .lb-row.r3 .lb-rank { background: linear-gradient(145deg,#f0b187,#c0733a); color: #2a1400; border: 0; }
+  .podium-col.p1 .podium-ava { width: 66px; height: 66px; border-color: var(--rank1); }
+  .podium-col.p2 .podium-ava { border-color: var(--rank2); }
+  .podium-col.p3 .podium-ava { border-color: var(--rank3); }
+  .podium-ava img { width: 100%; height: 100%; object-fit: cover; }
+  .podium-ava .ph { color: var(--dim); font-size: 12px; letter-spacing: 1px; }
+  .podium-crown {
+    position: absolute; bottom: -3px; right: -3px; width: 22px; height: 22px; border-radius: 50%;
+    background: var(--bg); display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 1px 4px rgba(0,0,0,.5);
+  }
+  .podium-crown svg { width: 13px; height: 13px; }
+  .podium-name {
+    margin-top: 8px; font-size: 13px; font-weight: 600; text-align: center;
+    max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .podium-val { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .podium-block {
+    margin-top: 8px; width: 100%; border-radius: 10px 10px 0 0;
+    display: flex; align-items: flex-start; justify-content: center;
+    padding-top: 7px; font-weight: 800; font-size: 15px;
+  }
+  .podium-col.p1 .podium-block { height: 92px; background: linear-gradient(180deg, color-mix(in srgb, var(--rank1) 88%, #fff), var(--rank1)); color: #3a2a00; }
+  .podium-col.p2 .podium-block { height: 68px; background: linear-gradient(180deg, color-mix(in srgb, var(--rank2) 88%, #fff), var(--rank2)); color: #1a2030; }
+  .podium-col.p3 .podium-block { height: 54px; background: linear-gradient(180deg, color-mix(in srgb, var(--rank3) 88%, #fff), var(--rank3)); color: #2a1400; }
+
+  /* rankings list (ranks 4+) */
+  .lb { display: flex; flex-direction: column; }
+  .lb-row {
+    display: flex; align-items: center; gap: 12px; padding: 10px 8px;
+    border-bottom: 1px solid var(--border); border-radius: 8px;
+    border: 2px solid transparent; border-bottom: 1px solid var(--border);
+  }
+  .lb-row.me { border: 2px solid var(--accent); background: rgba(255,77,109,.10); border-radius: 10px; }
+  .lb-rank {
+    flex: 0 0 26px; text-align: right; font-size: 14px; font-weight: 700;
+    color: var(--dim); font-variant-numeric: tabular-nums;
+  }
   .lb-eyes {
-    flex: 0 0 auto; width: 52px; height: 32px; border-radius: 8px;
+    flex: 0 0 auto; width: 46px; height: 30px; border-radius: 8px;
     display: flex; align-items: center; justify-content: center;
     background: #0d1018; border: 1px solid var(--border); overflow: hidden;
   }
-  .lb-eyes img { width: 100%; height: 100%; object-fit: contain; }
+  .lb-eyes img { width: 100%; height: 100%; object-fit: cover; }
   .lb-eyes.empty { color: var(--dim); font-size: 11px; letter-spacing: 1px; border-style: dashed; }
   .lb-main { flex: 1 1 auto; min-width: 0; }
   .lb-name { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .lb-byline { font-size: 11px; color: var(--dim); margin-top: 2px; }
-  .lb-score { flex: 0 0 auto; font-weight: 700; font-size: 17px; }
+  .lb-score { flex: 0 0 auto; font-weight: 700; font-size: 17px; font-variant-numeric: tabular-nums; }
   .lb-score small { font-size: 12px; color: var(--dim); font-weight: 400; }
   .consent { display: flex; align-items: center; gap: 9px; margin-top: 12px;
              font-size: 13px; color: var(--dim); cursor: pointer; user-select: none; }
@@ -132,7 +167,10 @@
   </div>
 
   <div class="panel">
-    <div class="label">hall of dry eyes</div>
+    <div class="lb-head">
+      <div><div class="lb-title">HALL OF DRY EYES</div><div class="lb-range" id="lb-range">all-time</div></div>
+    </div>
+    <div class="podium" id="podium"></div>
     <div class="lb" id="board"></div>
     <div class="empty" id="board-empty">no champions yet — be the first</div>
   </div>
@@ -169,7 +207,10 @@
   <button class="ghost" id="share-btn">share my dry eyes 📤</button>
   <button class="ghost" id="home-btn">back to lobby</button>
   <div class="panel">
-    <div class="label">hall of dry eyes</div>
+    <div class="lb-head">
+      <div><div class="lb-title">HALL OF DRY EYES</div><div class="lb-range" id="lb-range2">all-time</div></div>
+    </div>
+    <div class="podium" id="podium2"></div>
     <div class="lb" id="board2"></div>
   </div>
 </div>
@@ -202,29 +243,56 @@ es.onmessage = e => {
     $('spectate').removeAttribute('src');
   }
 
-  renderBoard($('board'), m.board);
-  renderBoard($('board2'), m.board);
+  renderLeaderboard($('podium'), $('board'), $('lb-range'), m.board);
+  renderLeaderboard($('podium2'), $('board2'), $('lb-range2'), m.board);
   $('board-empty').style.display = m.board.length ? 'none' : 'block';
 };
 
-function renderBoard(el, board) {
-  el.innerHTML = board.map((e, i) => {
-    const rank = i + 1;
-    const mine = myName && e.name.toLowerCase() === myName.toLowerCase();
-    const eyes = e.avatar
-      ? `<img src="/avatar?id=${e.avatar}" alt="">`
-      : '✕ ✕';
-    const byline = (mine ? 'you · ' : '') + (e.when || '');
-    return `<div class="lb-row r${rank <= 3 ? rank : 'n'}${mine ? ' me' : ''}">` +
+const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const isMe = name => myName && name.toLowerCase() === myName.toLowerCase();
+const crown = colorVar =>
+  `<span class="podium-crown"><svg viewBox="0 0 24 24" fill="none" stroke="var(${colorVar})" ` +
+  `stroke-width="2.4" stroke-linejoin="round"><path d="m2 4 3 12h14l3-12-6 7-4-7-4 7Z"/></svg></span>`;
+const avatarHtml = e => e.avatar ? `<img src="/avatar?id=${e.avatar}" alt="">` : '<span class="ph">✕ ✕</span>';
+
+function fmtRange(board) {
+  const dates = board.map(e => e.when).filter(Boolean).sort();
+  if (!dates.length) return 'all-time';
+  const fmt = d => { const t = new Date(d + 'T00:00'); return isNaN(t) ? d
+    : t.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }); };
+  return dates[0] === dates[dates.length - 1] ? fmt(dates[0]) : `${fmt(dates[0])} – ${fmt(dates[dates.length - 1])}`;
+}
+
+function renderLeaderboard(podiumEl, listEl, rangeEl, board) {
+  if (rangeEl) rangeEl.textContent = fmtRange(board);
+
+  // podium: top 3, displayed 2nd · 1st · 3rd
+  const rankVar = { 1: '--rank1', 2: '--rank2', 3: '--rank3' };
+  const order = [board[1], board[0], board[2]];  // 2,1,3 (undefined entries skipped)
+  podiumEl.innerHTML = order.map((e) => {
+    if (!e) return '';
+    const rank = board.indexOf(e) + 1;
+    return `<div class="podium-col p${rank}${isMe(e.name) ? ' me' : ''}">` +
+      `<div class="podium-ava">${avatarHtml(e)}${crown(rankVar[rank])}</div>` +
+      `<div class="podium-name">${esc(e.name)}</div>` +
+      `<div class="podium-val">${e.score.toFixed(2)}s</div>` +
+      `<div class="podium-block">${rank}</div>` +
+    `</div>`;
+  }).join('');
+
+  // rankings list: 4th place onward
+  listEl.innerHTML = board.slice(3).map((e, i) => {
+    const rank = i + 4;
+    const byline = (isMe(e.name) ? 'you · ' : '') + (e.when || '');
+    return `<div class="lb-row${isMe(e.name) ? ' me' : ''}">` +
       `<div class="lb-rank">${rank}</div>` +
-      `<div class="lb-eyes${e.avatar ? '' : ' empty'}">${eyes}</div>` +
+      `<div class="lb-eyes${e.avatar ? '' : ' empty'}">${avatarHtml(e)}</div>` +
       `<div class="lb-main"><div class="lb-name">${esc(e.name)}</div>` +
         `<div class="lb-byline">${byline}</div></div>` +
       `<div class="lb-score">${e.score.toFixed(2)}<small>s</small></div>` +
     `</div>`;
   }).join('');
 }
-const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 // ---------- joining ----------
 $('play-btn').onclick = play;
