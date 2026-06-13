@@ -420,6 +420,16 @@ void EndRoundLocked(double now, const char* reason) {
     g.end_reason = reason;
     g.final_score = std::max(0.0, now - g.stare_start);
 
+    // eyes left the camera: disqualified — no leaderboard entry, no profile
+    if (g.end_reason == "lost") {
+        g.final_rank = -1;
+        g.final_best = -1;
+        g.final_avatar.clear();
+        g.phase = Phase::kDone;
+        g.phase_start = now;
+        return;
+    }
+
     // freeze the player's eyes at the moment of the fatal blink
     std::string avatar_id;
     if (g.want_eyes && now - g.eye_t < 2.0) {

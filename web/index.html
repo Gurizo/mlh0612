@@ -327,17 +327,19 @@ function onGameState(m) {
     token = null;
     stopCam();
     lastResult = m;
-    $('r-label').textContent = m.reason === 'lost'
-      ? 'your eyes left the arena' : 'you blinked';
+    const dq = m.reason === 'lost';
+    $('r-label').textContent = dq ? 'disqualified' : 'you blinked';
     $('r-score').textContent = m.score.toFixed(2) + 's';
-    $('r-rank').innerHTML = m.rank === 1 ? '👑 <b>NEW CHAMPION</b>'
+    $('r-rank').innerHTML = dq ? '🚫 your eyes left the arena — no score recorded'
+                          : m.rank === 1 ? '👑 <b>NEW CHAMPION</b>'
                           : m.rank > 0 ? `rank <b>#${m.rank}</b> in the hall of dry eyes` : '';
     $('r-eyes').style.display = m.avatar ? 'block' : 'none';
     if (m.avatar) $('r-eyes').src = '/avatar?id=' + m.avatar;
     const isPB = m.best > 0 && m.score >= m.best - 0.005;
-    $('r-best').style.display = m.best > 0 ? 'block' : 'none';
+    $('r-best').style.display = !dq && m.best > 0 ? 'block' : 'none';
     $('r-best').textContent = isPB ? 'new personal best!'
                                    : `personal best: ${m.best.toFixed(2)}s — profile keeps it`;
+    $('share-btn').style.display = dq ? 'none' : 'block';
     show('screen-result');
   } else if (m.phase === 'idle') {
     token = null;
