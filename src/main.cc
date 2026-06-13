@@ -7,10 +7,11 @@
 // persist to a JSON leaderboard with eye-crop avatars.
 //
 //   GET  /            — game UI (web/index.html)
-//   GET  /stream      — MJPEG re-broadcast of the current player (spectators)
-//   GET  /events      — SSE: game state, vitals, leaderboard (10 Hz)
+//   GET  /events      — SSE: game state + leaderboard (10 Hz). No video.
+//   GET  /avatar?id=  — a consented eye-crop PNG (eyes only, never the face)
 //   POST /api/join    — {"name":"..."} -> {"token":"..."} or 409 when busy
-//   POST /api/frame   — JPEG body + X-TS header (client µs); acks game state
+//   POST /api/frame   — JPEG body + X-TS header; used only for on-device
+//                       detection + the eye crop. Frames are never re-served.
 //   POST /api/leave   — ?token=... forfeits / ends the session
 //
 // Usage:
@@ -821,32 +822,9 @@ int main(int argc, char** argv) {
         res.set_content(it->second, is_png ? "image/png" : "image/jpeg");
     });
 
-    server.Get("/stream", [](const httplib::Request&, httplib::Response& res) {
-        res.set_chunked_content_provider(
-            "multipart/x-mixed-replace; boundary=frame",
-            [last_seq = uint64_t{0}](size_t, httplib::DataSink& sink) mutable {
-                std::string jpeg;
-                {
-                    std::lock_guard<std::mutex> lock(g.mu);
-                    if (g.jpeg_seq != last_seq && !g.jpeg.empty()) {
-                        last_seq = g.jpeg_seq;
-                        jpeg = g.jpeg;
-                    }
-                }
-                if (!jpeg.empty()) {
-                    char header[128];
-                    snprintf(header, sizeof(header),
-                             "--frame\r\nContent-Type: image/jpeg\r\n"
-                             "Content-Length: %zu\r\n\r\n",
-                             jpeg.size());
-                    if (!sink.write(header, strlen(header))) return false;
-                    if (!sink.write(jpeg.data(), jpeg.size())) return false;
-                    if (!sink.write("\r\n", 2)) return false;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(66));
-                return true;
-            });
-    });
+    // NOTE: there is intentionally no live camera broadcast. A player's frames
+    // are used only for on-device detection and the consented eye-crop avatar —
+    // they are never re-served to spectators or anyone else.
 
     server.Get("/events", [](const httplib::Request&, httplib::Response& res) {
         res.set_chunked_content_provider(

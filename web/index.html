@@ -207,7 +207,6 @@
   <div class="panel" id="live-banner">
     <div class="label">live now</div>
     <div><span class="who" id="live-name"></span> is staring… <b id="live-timer">0.0</b>s</div>
-    <img id="spectate" alt="">
   </div>
 
   <div class="panel">
@@ -269,6 +268,10 @@
 </div>
 
 <script>
+// camera APIs require a secure origin — bounce http -> https up front
+if (location.protocol === 'http:' && location.hostname !== 'localhost') {
+  location.replace('https://' + location.host + location.pathname + location.search);
+}
 const $ = id => document.getElementById(id);
 const FPS = 15, SEND_W = 480;
 
@@ -291,9 +294,6 @@ es.onmessage = e => {
     $('live-name').textContent = m.player;
     $('live-timer').textContent = m.phase === 'staring' ? m.stare_t.toFixed(1)
                                 : m.phase === 'done' ? m.score.toFixed(1) : '0.0';
-    if (!$('spectate').src) $('spectate').src = '/stream';
-  } else if ($('spectate').src) {
-    $('spectate').removeAttribute('src');
   }
 
   renderLeaderboard($('podium'), $('board'), $('lb-range'), m.board);
@@ -364,6 +364,15 @@ $('name').onkeydown = e => { if (e.key === 'Enter') play(); };
 async function play() {
   myName = $('name').value.trim() || myName || 'anonymous';
   $('err').style.display = 'none';
+  // Some in-app browsers (KakaoTalk, Instagram, etc.) and insecure origins
+  // don't expose the camera API at all — fail with a clear message, not a crash.
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    $('err').innerHTML = location.protocol !== 'https:'
+      ? 'open this page over <b>https://eyefight.xyz</b> to use the camera'
+      : "this in-app browser blocks the camera — tap ••• and <b>Open in Safari/Chrome</b>";
+    $('err').style.display = 'block';
+    return;
+  }
   try {
     if (!stream) {
       stream = await navigator.mediaDevices.getUserMedia({
