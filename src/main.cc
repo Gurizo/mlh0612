@@ -65,6 +65,9 @@ constexpr double kCountdownSeconds = 3.0;
 constexpr double kBlinkGraceSeconds = 0.5;   // ignore blink edges right at round start
 constexpr double kSessionTimeoutSeconds = 6; // no frames -> player vanished
 constexpr double kDoneLingerSeconds = 12;    // result shown before lobby reopens
+constexpr double kFaceFreshSeconds = 1.0;    // face required this recently to start staring
+constexpr double kFaceLostSeconds = 1.2;     // face gone this long mid-stare -> round over
+constexpr double kCountdownMaxSeconds = 25;  // never showed a face -> back to lobby
 
 double NowSeconds() {
     using namespace std::chrono;
@@ -135,6 +138,8 @@ struct GameState {
     int final_rank = -1;
     double final_best = -1;
     std::string final_avatar;
+    std::string end_reason;     // "blink" or "lost"
+    double face_t = 0;          // last time the SDK saw a face
 
     // per-eye boxes from the latest face landmarks (raw landmark coords;
     // whether they are normalized or pixel-space is decided at crop time)
@@ -412,6 +417,7 @@ void ResetToIdleLocked() {
     g.final_rank = -1;
     g.final_best = -1;
     g.final_avatar.clear();
+    g.end_reason.clear();
     g.eye_valid = false;
 }
 
@@ -424,8 +430,9 @@ bool SameName(const std::string& a, const std::string& b) {
     return true;
 }
 
-void EndRoundLocked(double now) {
-    g.final_score = now - g.stare_start;
+void EndRoundLocked(double now, const char* reason) {
+    g.end_reason = reason;
+    g.final_score = std::max(0.0, now - g.stare_start);
     g.final_bpm = g.bpm_n > 0 ? g.bpm_sum / g.bpm_n : 0;
 
     // freeze the player's eyes at the moment of the fatal blink
@@ -487,16 +494,27 @@ void TickLocked(double now) {
         case Phase::kIdle:
             break;
         case Phase::kCountdown:
-            if (now - g.phase_start >= kCountdownSeconds) {
+            // staring only begins once the SDK actually sees a face
+            if (now - g.phase_start >= kCountdownSeconds &&
+                now - g.face_t < kFaceFreshSeconds) {
                 g.phase = Phase::kStaring;
                 g.phase_start = now;
                 g.stare_start = now;
                 g.bpm_sum = 0;
                 g.bpm_n = 0;
             }
-            if (now - g.last_frame_t > kSessionTimeoutSeconds) ResetToIdleLocked();
+            if (now - g.last_frame_t > kSessionTimeoutSeconds ||
+                now - g.phase_start > kCountdownMaxSeconds) {
+                ResetToIdleLocked();
+            }
             break;
         case Phase::kStaring:
+            // eyes must stay in frame: face gone too long ends the round at
+            // the moment it was last seen
+            if (now - g.face_t > kFaceLostSeconds) {
+                EndRoundLocked(std::max(g.face_t, g.stare_start), "lost");
+                break;
+            }
             if (now - g.last_frame_t > kSessionTimeoutSeconds) ResetToIdleLocked();
             break;
         case Phase::kDone:
@@ -508,7 +526,7 @@ void TickLocked(double now) {
 void RegisterBlinkEdgeLocked(double now) {
     g.last_blink_t = now;
     if (g.phase == Phase::kStaring && now - g.stare_start > kBlinkGraceSeconds) {
-        EndRoundLocked(now);
+        EndRoundLocked(now, "blink");
     }
 }
 
@@ -554,6 +572,12 @@ void OnMetrics(const spectra::Metrics& m, int64_t /*timestamp_us*/) {
     }
     while (g.trace.size() > 1500) g.trace.pop_front();
 
+    // face presence: landmarks and blink samples are frame-driven, so their
+    // arrival means the SDK currently sees a face
+    if (m.has_face() && (m.face().landmarks_size() > 0 || m.face().blinking_size() > 0)) {
+        g.face_t = now;
+    }
+
     // eye region for the avatar crop (only worth tracking mid-session)
     if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
         UpdateEyeBoxFromLandmarks(m, now);
@@ -598,10 +622,12 @@ std::string GameJsonLocked(double now) {
     snprintf(buf, sizeof(buf),
              "\"phase\":\"%s\",\"player\":\"%s\",\"countdown\":%.1f,\"stare_t\":%.2f,"
              "\"score\":%.2f,\"rank\":%d,\"avg_bpm\":%.0f,\"best\":%.2f,\"avatar\":\"%s\","
+             "\"reason\":\"%s\",\"face\":%s,"
              "\"bpm\":%.1f,\"bpm_stable\":%s,\"br\":%.1f,"
              "\"blink_ago\":%.2f,\"hint\":\"%s\"",
              PhaseName(g.phase), JsonEscape(g.player).c_str(), countdown_left, stare_t,
              g.final_score, g.final_rank, g.final_bpm, g.final_best, g.final_avatar.c_str(),
+             g.end_reason.c_str(), now - g.face_t < kFaceFreshSeconds ? "true" : "false",
              g.bpm, g.bpm_stable ? "true" : "false", g.br,
              g.last_blink_t < 0 ? -1.0 : now - g.last_blink_t, JsonEscape(g.hint).c_str());
     return buf;
@@ -663,6 +689,8 @@ int main(int argc, char** argv) {
                     g.eyes[1] = {0.60f, 0.43f, 0.10f, 0.06f};
                     g.eye_valid = true;
                     g.eye_t = now;
+                    // a face is "seen" as long as frames keep arriving
+                    g.face_t = g.last_frame_t;
                 }
                 g.trace.push_back({now, std::sin(now * 7) + 0.3 * std::sin(now * 23)});
                 while (g.trace.size() > 1500) g.trace.pop_front();

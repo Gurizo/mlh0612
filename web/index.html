@@ -142,7 +142,7 @@
 <!-- ============ RESULT ============ -->
 <div id="screen-result" class="screen">
   <div class="panel">
-    <div class="label">you blinked</div>
+    <div class="label" id="r-label">you blinked</div>
     <div class="result-score" id="r-score">0.0s</div>
     <div class="result-sub">avg <span class="pulse-heart">♥</span> <span id="r-bpm">--</span> bpm while staring</div>
     <div class="result-rank" id="r-rank"></div>
@@ -296,8 +296,13 @@ function onGameState(m) {
   lastBlinkAgo = m.blink_ago;
 
   if (m.phase === 'countdown') {
-    $('countdown-num').textContent = Math.ceil(m.countdown);
-    $('g-msg').textContent = 'blink now while you still can';
+    if (m.countdown <= 0 && !m.face) {
+      $('countdown-num').textContent = '👀';
+      $('g-msg').textContent = 'show your eyes to begin';
+    } else {
+      $('countdown-num').textContent = Math.ceil(m.countdown);
+      $('g-msg').textContent = 'blink now while you still can';
+    }
   } else if (m.phase === 'staring') {
     $('countdown-num').textContent = '';
     $('stare-timer').style.display = 'block';
@@ -306,6 +311,8 @@ function onGameState(m) {
   } else if (m.phase === 'done') {
     token = null;
     stopCam();
+    $('r-label').textContent = m.reason === 'lost'
+      ? 'your eyes left the arena' : 'you blinked';
     $('r-score').textContent = m.score.toFixed(2) + 's';
     $('r-bpm').textContent = m.avg_bpm > 0 ? Math.round(m.avg_bpm) : '--';
     $('r-rank').innerHTML = m.rank === 1 ? '👑 <b>NEW CHAMPION</b>'
