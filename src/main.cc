@@ -136,12 +136,12 @@ struct GameState {
     double final_best = -1;
     std::string final_avatar;
 
-    // eye region from the latest face landmarks (raw landmark coords; whether
-    // they are normalized or pixel-space is decided at crop time)
+    // per-eye boxes from the latest face landmarks (raw landmark coords;
+    // whether they are normalized or pixel-space is decided at crop time)
+    struct EyeBox { float cx = 0, cy = 0, w = 0, h = 0; };
     bool eye_valid = false;
     double eye_t = 0;
-    float eye_min_x = 0, eye_max_x = 0, eye_min_y = 0, eye_max_y = 0;
-    int frame_w = 0, frame_h = 0;  // dims of the last decoded frame
+    EyeBox eyes[2];  // [0] = image-left eye, [1] = image-right eye
 
     // avatar id -> jpeg bytes (eye strips)
     std::map<std::string, std::string> avatars;
@@ -288,11 +288,12 @@ void LoadBoard() {
               [](const BoardEntry& a, const BoardEntry& b) { return a.score > b.score; });
 }
 
-// --- eye-strip avatars -------------------------------------------------------
+// --- floating-eyes avatars ---------------------------------------------------
 
-// Crop a both-eyes strip from the player's latest frame using the face
-// landmarks captured during the round. Returns JPEG bytes, or "" on failure.
-std::string CropEyeStripLocked() {
+// Crop each eye separately from the player's latest frame, mask them into
+// soft ovals, and composite them side by side on a transparent PNG: two eyes,
+// no face. Returns PNG bytes, or "" on failure.
+std::string CropEyesLocked() {
     if (!g.eye_valid || g.jpeg.empty()) return "";
 
     int w = 0, h = 0, channels = 0;
@@ -302,74 +303,100 @@ std::string CropEyeStripLocked() {
     if (!rgb) return "";
 
     // Landmarks may be normalized [0,1] or pixel-space depending on pipeline.
-    double min_x = g.eye_min_x, max_x = g.eye_max_x;
-    double min_y = g.eye_min_y, max_y = g.eye_max_y;
-    if (max_x <= 2.0 && max_y <= 2.0) {
-        min_x *= w; max_x *= w;
-        min_y *= h; max_y *= h;
+    GameState::EyeBox e[2] = {g.eyes[0], g.eyes[1]};
+    if (e[0].cx <= 2.0f && e[1].cx <= 2.0f && e[0].cy <= 2.0f && e[1].cy <= 2.0f) {
+        for (auto& b : e) { b.cx *= w; b.cy *= h; b.w *= w; b.h *= h; }
     }
-    // pad: a little sideways, generously up/down (brows and bags are character)
-    const double pad_x = (max_x - min_x) * 0.15;
-    const double pad_y = std::max((max_y - min_y) * 0.9, (max_x - min_x) * 0.12);
-    int x0 = std::max(0, static_cast<int>(min_x - pad_x));
-    int x1 = std::min(w, static_cast<int>(max_x + pad_x));
-    int y0 = std::max(0, static_cast<int>(min_y - pad_y));
-    int y1 = std::min(h, static_cast<int>(max_y + pad_y));
-    const int cw = x1 - x0, ch = y1 - y0;
-    if (cw < 24 || ch < 8) {  // degenerate box — refuse to make a 3-pixel soul
+
+    // one common box size so both eyes come out identical
+    const int bw = static_cast<int>(std::max(e[0].w, e[1].w) * 1.7);
+    const int bh = static_cast<int>(std::max(
+        {e[0].h * 2.2, e[1].h * 2.2, bw * 0.55}));  // blink-proof minimum height
+    if (bw < 12 || bh < 8 || bw > w || bh > h) {
         stbi_image_free(rgb);
         return "";
     }
 
-    std::vector<uint8_t> crop(static_cast<size_t>(cw) * ch * 3);
-    for (int y = 0; y < ch; ++y) {
-        memcpy(crop.data() + static_cast<size_t>(y) * cw * 3,
-               rgb + (static_cast<size_t>(y0 + y) * w + x0) * 3,
-               static_cast<size_t>(cw) * 3);
+    const int gap = bw / 3;
+    const int out_w = bw * 2 + gap, out_h = bh;
+    std::vector<uint8_t> out(static_cast<size_t>(out_w) * out_h * 4, 0);  // transparent
+
+    for (int k = 0; k < 2; ++k) {
+        int x0 = static_cast<int>(e[k].cx) - bw / 2;
+        int y0 = static_cast<int>(e[k].cy) - bh / 2;
+        x0 = std::max(0, std::min(x0, w - bw));
+        y0 = std::max(0, std::min(y0, h - bh));
+        const int ox = k * (bw + gap);
+        for (int y = 0; y < bh; ++y) {
+            for (int x = 0; x < bw; ++x) {
+                // feathered elliptical mask
+                const double nx = (x + 0.5) / bw * 2 - 1, ny = (y + 0.5) / bh * 2 - 1;
+                const double r2 = nx * nx + ny * ny;
+                if (r2 >= 1.0) continue;
+                const double a = std::min(1.0, (1.0 - r2) * 3.0);
+                const uint8_t* src = rgb + (static_cast<size_t>(y0 + y) * w + x0 + x) * 3;
+                uint8_t* dst = out.data() + (static_cast<size_t>(y) * out_w + ox + x) * 4;
+                dst[0] = src[0];
+                dst[1] = src[1];
+                dst[2] = src[2];
+                dst[3] = static_cast<uint8_t>(a * 255);
+            }
+        }
     }
     stbi_image_free(rgb);
 
-    std::string jpeg;
+    std::string png;
     auto sink = [](void* ctx, void* data, int size) {
         static_cast<std::string*>(ctx)->append(static_cast<char*>(data), size);
     };
-    if (!stbi_write_jpg_to_func(sink, &jpeg, cw, ch, 3, crop.data(), 80)) return "";
-    return jpeg;
+    if (!stbi_write_png_to_func(sink, &png, out_w, out_h, 4, out.data(), out_w * 4)) return "";
+    return png;
 }
 
-// MediaPipe-facemesh indices for eye corners/lids and brows. Used when the
-// SDK delivers a dense (>=468 point) mesh; otherwise we fall back to a strip
-// across the upper-middle of the whole-landmark bounding box.
-constexpr int kEyeIdx[] = {33, 133, 159, 145, 263, 362, 386, 374,
-                           70, 63, 105, 66, 107, 300, 293, 334, 296, 336};
-
+// MediaPipe-facemesh indices: eye corners and lids, per eye. Used when the
+// SDK delivers a dense (>=468 point) mesh; sparser meshes fall back to two
+// boxes placed heuristically inside the whole-landmark bounding box.
 void UpdateEyeBoxFromLandmarks(const spectra::Metrics& m, double now) {
     if (!m.has_face() || m.face().landmarks_size() == 0) return;
     const auto& lm = m.face().landmarks(m.face().landmarks_size() - 1);
     const int n = lm.value_size();
     if (n == 0) return;
 
-    float min_x = 1e9f, max_x = -1e9f, min_y = 1e9f, max_y = -1e9f;
+    GameState::EyeBox boxes[2];
     if (n >= 468) {
-        for (int idx : kEyeIdx) {
-            const auto& p = lm.value(idx);
-            min_x = std::min(min_x, p.x()); max_x = std::max(max_x, p.x());
-            min_y = std::min(min_y, p.y()); max_y = std::max(max_y, p.y());
+        // {outer corner, inner corner, top lid, bottom lid}
+        constexpr int kRight[4] = {33, 133, 159, 145};
+        constexpr int kLeft[4] = {263, 362, 386, 374};
+        const int* idx[2] = {kRight, kLeft};
+        for (int k = 0; k < 2; ++k) {
+            const auto& a = lm.value(idx[k][0]);
+            const auto& b = lm.value(idx[k][1]);
+            const auto& t = lm.value(idx[k][2]);
+            const auto& u = lm.value(idx[k][3]);
+            boxes[k].cx = (a.x() + b.x()) / 2;
+            boxes[k].cy = (t.y() + u.y()) / 2;
+            boxes[k].w = std::abs(b.x() - a.x());
+            boxes[k].h = std::abs(u.y() - t.y());
         }
     } else {
+        float min_x = 1e9f, max_x = -1e9f, min_y = 1e9f, max_y = -1e9f;
         for (int i = 0; i < n; ++i) {
             const auto& p = lm.value(i);
             min_x = std::min(min_x, p.x()); max_x = std::max(max_x, p.x());
             min_y = std::min(min_y, p.y()); max_y = std::max(max_y, p.y());
         }
-        // eyes live roughly 30-50% down the face box, middle ~76% across
+        // eyes sit roughly 40% down the face box, ~30/70% across
         const float fw = max_x - min_x, fh = max_y - min_y;
-        min_x += fw * 0.12f; max_x -= fw * 0.12f;
-        const float top = min_y + fh * 0.30f, bot = min_y + fh * 0.50f;
-        min_y = top; max_y = bot;
+        for (int k = 0; k < 2; ++k) {
+            boxes[k].cx = min_x + fw * (k == 0 ? 0.30f : 0.70f);
+            boxes[k].cy = min_y + fh * 0.40f;
+            boxes[k].w = fw * 0.24f;
+            boxes[k].h = fh * 0.10f;
+        }
     }
-    g.eye_min_x = min_x; g.eye_max_x = max_x;
-    g.eye_min_y = min_y; g.eye_max_y = max_y;
+    if (boxes[0].cx > boxes[1].cx) std::swap(boxes[0], boxes[1]);
+    g.eyes[0] = boxes[0];
+    g.eyes[1] = boxes[1];
     g.eye_valid = true;
     g.eye_t = now;
 }
@@ -404,10 +431,10 @@ void EndRoundLocked(double now) {
     // freeze the player's eyes at the moment of the fatal blink
     std::string avatar_id;
     if (g.want_eyes && now - g.eye_t < 2.0) {
-        const std::string jpeg = CropEyeStripLocked();
-        if (!jpeg.empty()) {
+        const std::string png = CropEyesLocked();
+        if (!png.empty()) {
             avatar_id = RandomToken().substr(0, 16);
-            g.avatars[avatar_id] = jpeg;
+            g.avatars[avatar_id] = png;
         }
     }
     g.final_avatar = avatar_id;
@@ -631,9 +658,9 @@ int main(int argc, char** argv) {
                 g.bpm_stable = true;
                 if (g.phase == Phase::kStaring) { g.bpm_sum += g.bpm; ++g.bpm_n; }
                 if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
-                    // pretend the eyes sit in a centered strip of the frame
-                    g.eye_min_x = 0.30f; g.eye_max_x = 0.70f;
-                    g.eye_min_y = 0.38f; g.eye_max_y = 0.48f;
+                    // pretend two eyes sit either side of the frame center
+                    g.eyes[0] = {0.40f, 0.43f, 0.10f, 0.06f};
+                    g.eyes[1] = {0.60f, 0.43f, 0.10f, 0.06f};
                     g.eye_valid = true;
                     g.eye_t = now;
                 }
@@ -809,7 +836,8 @@ int main(int argc, char** argv) {
             return;
         }
         res.set_header("Cache-Control", "public, max-age=31536000, immutable");
-        res.set_content(it->second, "image/jpeg");
+        const bool is_png = it->second.size() > 4 && it->second.compare(1, 3, "PNG") == 0;
+        res.set_content(it->second, is_png ? "image/png" : "image/jpeg");
     });
 
     server.Get("/stream", [](const httplib::Request&, httplib::Response& res) {
