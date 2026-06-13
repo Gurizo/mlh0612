@@ -135,7 +135,10 @@ struct GameState {
     struct EyeBox { float cx = 0, cy = 0, w = 0, h = 0; };
     bool eye_valid = false;
     double eye_t = 0;
-    EyeBox eyes[2];  // [0] = image-left eye, [1] = image-right eye
+    EyeBox eyes[2];        // [0] = image-left eye, [1] = image-right eye
+    std::string eye_frame; // jpeg snapshot taken when eyes were last detected,
+                           // so the avatar crop matches the box even if the
+                           // newest frame is stale/post-blink
 
     // avatar id -> jpeg bytes (eye strips)
     std::map<std::string, std::string> avatars;
@@ -292,13 +295,17 @@ void LoadBoard() {
 // soft ovals, and composite them side by side on a transparent PNG: two eyes,
 // no face. Returns PNG bytes, or "" on failure.
 std::string CropEyesLocked() {
-    if (!g.eye_valid || g.jpeg.empty()) return "";
+    if (!g.eye_valid || g.eye_frame.empty()) {
+        fprintf(stderr, "[avatar] skipped: eye_valid=%d frame_bytes=%zu\n",
+                g.eye_valid, g.eye_frame.size());
+        return "";
+    }
 
     int w = 0, h = 0, channels = 0;
     unsigned char* rgb = stbi_load_from_memory(
-        reinterpret_cast<const unsigned char*>(g.jpeg.data()),
-        static_cast<int>(g.jpeg.size()), &w, &h, &channels, 3);
-    if (!rgb) return "";
+        reinterpret_cast<const unsigned char*>(g.eye_frame.data()),
+        static_cast<int>(g.eye_frame.size()), &w, &h, &channels, 3);
+    if (!rgb) { fprintf(stderr, "[avatar] decode failed\n"); return ""; }
 
     // Landmarks may be normalized [0,1] or pixel-space depending on pipeline.
     GameState::EyeBox e[2] = {g.eyes[0], g.eyes[1]};
@@ -311,6 +318,10 @@ std::string CropEyesLocked() {
     const int bh = static_cast<int>(std::max(
         {e[0].h * 2.2, e[1].h * 2.2, bw * 0.55}));  // blink-proof minimum height
     if (bw < 12 || bh < 8 || bw > w || bh > h) {
+        fprintf(stderr, "[avatar] degenerate box: bw=%d bh=%d frame=%dx%d "
+                "eyesL=(%.3f,%.3f,%.3f,%.3f) eyesR=(%.3f,%.3f,%.3f,%.3f)\n",
+                bw, bh, w, h, e[0].cx, e[0].cy, e[0].w, e[0].h,
+                e[1].cx, e[1].cy, e[1].w, e[1].h);
         stbi_image_free(rgb);
         return "";
     }
@@ -397,6 +408,7 @@ void UpdateEyeBoxFromLandmarks(const spectra::Metrics& m, double now) {
     g.eyes[1] = boxes[1];
     g.eye_valid = true;
     g.eye_t = now;
+    if (!g.jpeg.empty()) g.eye_frame = g.jpeg;  // freeze a matching frame now
 }
 
 // --- game state machine ------------------------------------------------------
@@ -412,6 +424,7 @@ void ResetToIdleLocked() {
     g.final_avatar.clear();
     g.end_reason.clear();
     g.eye_valid = false;
+    g.eye_frame.clear();
 }
 
 bool SameName(const std::string& a, const std::string& b) {
@@ -437,13 +450,18 @@ void EndRoundLocked(double now, const char* reason) {
         return;
     }
 
-    // freeze the player's eyes at the moment of the fatal blink
+    // Use the eyes captured during the round (any moment the SDK saw a face),
+    // not just the final instant — phone detection can drop for a beat right
+    // before the blink, and we don't want to lose the avatar over that.
     std::string avatar_id;
-    if (g.want_eyes && now - g.eye_t < 2.0) {
+    fprintf(stderr, "[avatar] round end: want_eyes=%d eye_valid=%d eye_age=%.2fs frame_bytes=%zu\n",
+            g.want_eyes, g.eye_valid, now - g.eye_t, g.eye_frame.size());
+    if (g.want_eyes && g.eye_valid) {
         const std::string png = CropEyesLocked();
         if (!png.empty()) {
             avatar_id = RandomToken().substr(0, 16);
             g.avatars[avatar_id] = png;
+            fprintf(stderr, "[avatar] created (%zu bytes)\n", png.size());
         }
     }
     g.final_avatar = avatar_id;
@@ -634,6 +652,7 @@ int main(int argc, char** argv) {
                     g.eyes[1] = {0.60f, 0.43f, 0.10f, 0.06f};
                     g.eye_valid = true;
                     g.eye_t = now;
+                    if (!g.jpeg.empty()) g.eye_frame = g.jpeg;
                     // a face is "seen" as long as frames keep arriving
                     g.face_t = g.last_frame_t;
                 }
