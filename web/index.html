@@ -438,13 +438,22 @@ async function sendLoop() {
   const video = $('cam'), canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   let inFlight = 0;
+  canvas.width = 0;   // frame size is locked on the first frame (see below)
 
   const tick = setInterval(async () => {
     if (!token) { clearInterval(tick); sending = false; return; }
     if (inFlight >= 4 || video.videoWidth === 0) return;   // don't outrun the link
-    canvas.width = SEND_W;
-    canvas.height = Math.round(video.videoHeight * SEND_W / video.videoWidth);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    // Lock the output size ONCE. Mobile cameras change resolution/orientation
+    // mid-stream; if frame dimensions vary, the SDK's optical-flow tracker
+    // crashes. A fixed canvas + cover-draw guarantees every frame is identical.
+    if (!canvas.width) {
+      canvas.width = SEND_W;
+      canvas.height = Math.round(SEND_W * video.videoHeight / video.videoWidth / 2) * 2;
+    }
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const scale = Math.max(canvas.width / vw, canvas.height / vh);  // cover
+    const dw = vw * scale, dh = vh * scale;
+    ctx.drawImage(video, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
     const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.65));
     if (!token) return;
     inFlight++;

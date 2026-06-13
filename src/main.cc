@@ -148,6 +148,8 @@ struct GameState {
     int64_t last_client_us = 0;    // newest client timestamp fed to the SDK
     int64_t virtual_base_us = 0;
     int64_t last_sent_us = 0;
+    int feed_w = 0, feed_h = 0;    // frame size locked per session — the SDK's
+                                   // optical-flow tracker crashes if it changes
 
     std::vector<BoardEntry> board;
 };
@@ -754,8 +756,13 @@ int main(int argc, char** argv) {
                 g.client_first_us = client_us;
                 g.last_client_us = client_us - 1;
                 g.virtual_base_us = g.last_sent_us + 33'000;
+                g.feed_w = w;                        // lock this session's frame size
+                g.feed_h = h;
             }
-            if (client_us > g.last_client_us) {     // in order — feed it
+            // Feed only in-order frames of the locked size. A size change mid-
+            // stream (mobile orientation/resolution flips) crashes the SDK's
+            // optical-flow tracker, so drop those rather than feed them.
+            if (client_us > g.last_client_us && w == g.feed_w && h == g.feed_h) {
                 g.last_client_us = client_us;
                 int64_t ts = g.virtual_base_us + (client_us - g.client_first_us);
                 if (ts - g.last_sent_us > 1'500'000) {  // stall: compress the gap
@@ -775,7 +782,7 @@ int main(int argc, char** argv) {
                     if (logged++ < 10) fprintf(stderr, "Send failed: %s\n", err.message.c_str());
                 }
             }
-            // else: arrived late/out of order — drop, keep the SDK clock monotonic
+            // else: late/out-of-order or wrong size — drop it
         }
         stbi_image_free(rgb);
 
