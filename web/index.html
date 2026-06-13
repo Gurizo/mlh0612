@@ -47,6 +47,21 @@
   tr.top td.rank { color: var(--warn); }
   td.score { text-align: right; font-weight: 700; }
   td.bpm { text-align: right; color: var(--dim); }
+  td.eyes { width: 66px; }
+  .eye-strip {
+    display: block; width: 60px; height: 22px; object-fit: cover;
+    border-radius: 5px; border: 1px solid var(--border); background: var(--panel2);
+  }
+  .no-eyes {
+    display: flex; align-items: center; justify-content: center;
+    width: 60px; height: 22px; border-radius: 5px; border: 1px dashed var(--border);
+    color: var(--dim); font-size: 10px; letter-spacing: 1px;
+  }
+  .consent { display: flex; align-items: center; gap: 9px; margin-top: 12px;
+             font-size: 13px; color: var(--dim); cursor: pointer; user-select: none; }
+  .consent input { accent-color: var(--accent); width: 16px; height: 16px; cursor: pointer; }
+  .fallen-eyes { display: block; height: 64px; margin: 12px auto 0; border-radius: 8px;
+                 border: 1px solid var(--border); }
   .empty { color: var(--dim); text-align: center; padding: 16px 0; font-size: 13px; }
   #err { color: var(--bad); font-size: 13px; margin-top: 10px; display: none; }
 
@@ -94,6 +109,8 @@
   <div class="panel">
     <div class="label">enter the arena</div>
     <input type="text" id="name" placeholder="your name" maxlength="16" autocomplete="off">
+    <label class="consent"><input type="checkbox" id="eyes-ok" checked>
+      put my eyes on the board (a tiny crop of just your eyes becomes your profile)</label>
     <button id="play-btn">STARE 👁</button>
     <div id="err"></div>
   </div>
@@ -101,7 +118,7 @@
   <div class="panel">
     <div class="label">hall of dry eyes</div>
     <table id="board">
-      <thead><tr><th></th><th>name</th><th style="text-align:right">time</th><th style="text-align:right">♥bpm</th></tr></thead>
+      <thead><tr><th></th><th></th><th>name</th><th style="text-align:right">time</th><th style="text-align:right">♥bpm</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="empty" id="board-empty">no champions yet — be the first</div>
@@ -133,6 +150,8 @@
     <div class="result-score" id="r-score">0.0s</div>
     <div class="result-sub">avg <span class="pulse-heart">♥</span> <span id="r-bpm">--</span> bpm while staring</div>
     <div class="result-rank" id="r-rank"></div>
+    <img class="fallen-eyes" id="r-eyes" alt="your eyes at the fatal blink" style="display:none">
+    <div class="result-sub" id="r-best" style="display:none"></div>
   </div>
   <button id="again-btn">GO AGAIN 👁</button>
   <button class="ghost" id="home-btn">back to lobby</button>
@@ -179,6 +198,9 @@ es.onmessage = e => {
 function renderBoard(tbody, board) {
   tbody.innerHTML = board.map((e, i) =>
     `<tr class="${i === 0 ? 'top' : ''}"><td class="rank">${i === 0 ? '👑' : i + 1}</td>` +
+    `<td class="eyes">${e.avatar
+      ? `<img class="eye-strip" src="/avatar?id=${e.avatar}" alt="">`
+      : `<span class="no-eyes">✕ ✕</span>`}</td>` +
     `<td>${esc(e.name)}</td><td class="score">${e.score.toFixed(2)}s</td>` +
     `<td class="bpm">${e.bpm > 0 ? Math.round(e.bpm) : '–'}</td></tr>`).join('');
 }
@@ -203,7 +225,7 @@ async function play() {
     $('cam').srcObject = stream;
     const r = await fetch('/api/join', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: myName })
+      body: JSON.stringify({ name: myName, eyes: $('eyes-ok').checked })
     });
     if (r.status === 409) {
       const b = await r.json();
@@ -292,6 +314,12 @@ function onGameState(m) {
     $('r-bpm').textContent = m.avg_bpm > 0 ? Math.round(m.avg_bpm) : '--';
     $('r-rank').innerHTML = m.rank === 1 ? '👑 <b>NEW CHAMPION</b>'
                           : m.rank > 0 ? `rank <b>#${m.rank}</b> in the hall of dry eyes` : '';
+    $('r-eyes').style.display = m.avatar ? 'block' : 'none';
+    if (m.avatar) $('r-eyes').src = '/avatar?id=' + m.avatar;
+    const isPB = m.best > 0 && m.score >= m.best - 0.005;
+    $('r-best').style.display = m.best > 0 ? 'block' : 'none';
+    $('r-best').textContent = isPB ? 'new personal best!'
+                                   : `personal best: ${m.best.toFixed(2)}s — profile keeps it`;
     show('screen-result');
   } else if (m.phase === 'idle') {
     token = null;

@@ -25,6 +25,7 @@
 #include <ctime>
 #include <deque>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -43,6 +44,8 @@
 #define STBI_ONLY_JPEG
 #define STBI_NO_FAILURE_STRINGS
 #include "stb_image.h"
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
 
 namespace spectra = presage::smartspectra;
 using presage::smartspectra::MetricType;
@@ -81,9 +84,10 @@ struct TracePoint { double t, v; };
 
 struct BoardEntry {
     std::string name;
-    double score = 0;   // seconds stared
-    double bpm = 0;     // average pulse during the stare (0 = no signal)
-    std::string when;   // ISO date
+    double score = 0;     // best staring time, seconds
+    double bpm = 0;       // average pulse during that stare (0 = no signal)
+    std::string when;     // ISO date of last play
+    std::string avatar;   // id into g.avatars ("" = eyeless default profile)
 };
 
 enum class Phase { kIdle, kCountdown, kStaring, kDone };
@@ -120,6 +124,7 @@ struct GameState {
     Phase phase = Phase::kIdle;
     std::string token;
     std::string player;
+    bool want_eyes = true;
     double phase_start = 0;
     double stare_start = 0;
     double last_frame_t = 0;
@@ -128,6 +133,18 @@ struct GameState {
     double final_score = -1;
     double final_bpm = 0;
     int final_rank = -1;
+    double final_best = -1;
+    std::string final_avatar;
+
+    // eye region from the latest face landmarks (raw landmark coords; whether
+    // they are normalized or pixel-space is decided at crop time)
+    bool eye_valid = false;
+    double eye_t = 0;
+    float eye_min_x = 0, eye_max_x = 0, eye_min_y = 0, eye_max_y = 0;
+    int frame_w = 0, frame_h = 0;  // dims of the last decoded frame
+
+    // avatar id -> jpeg bytes (eye strips)
+    std::map<std::string, std::string> avatars;
 
     // virtual-clock mapping for CustomInput (compresses idle gaps; the SDK
     // rejects forward timestamp gaps > 2 s and non-monotonic values)
@@ -166,6 +183,49 @@ std::string TodayIso() {
     return buf;
 }
 
+// --- base64 (for persisting avatar JPEGs inside leaderboard.json) -----------
+
+const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+std::string Base64Encode(const std::string& in) {
+    std::string out;
+    out.reserve((in.size() + 2) / 3 * 4);
+    for (size_t i = 0; i < in.size(); i += 3) {
+        uint32_t v = static_cast<uint8_t>(in[i]) << 16;
+        if (i + 1 < in.size()) v |= static_cast<uint8_t>(in[i + 1]) << 8;
+        if (i + 2 < in.size()) v |= static_cast<uint8_t>(in[i + 2]);
+        out += kB64[(v >> 18) & 63];
+        out += kB64[(v >> 12) & 63];
+        out += i + 1 < in.size() ? kB64[(v >> 6) & 63] : '=';
+        out += i + 2 < in.size() ? kB64[v & 63] : '=';
+    }
+    return out;
+}
+
+std::string Base64Decode(const std::string& in) {
+    static int8_t lut[256];
+    static bool init = false;
+    if (!init) {
+        memset(lut, -1, sizeof(lut));
+        for (int i = 0; i < 64; ++i) lut[static_cast<uint8_t>(kB64[i])] = static_cast<int8_t>(i);
+        init = true;
+    }
+    std::string out;
+    uint32_t v = 0;
+    int bits = 0;
+    for (char c : in) {
+        const int8_t d = lut[static_cast<uint8_t>(c)];
+        if (d < 0) continue;
+        v = (v << 6) | d;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += static_cast<char>((v >> bits) & 0xFF);
+        }
+    }
+    return out;
+}
+
 // --- leaderboard persistence (single small JSON file) -----------------------
 
 void SaveBoardLocked() {
@@ -174,8 +234,12 @@ void SaveBoardLocked() {
     for (size_t i = 0; i < g.board.size(); ++i) {
         const auto& e = g.board[i];
         f << "  {\"name\":\"" << JsonEscape(e.name) << "\",\"score\":" << e.score
-          << ",\"bpm\":" << e.bpm << ",\"when\":\"" << e.when << "\"}"
-          << (i + 1 < g.board.size() ? ",\n" : "\n");
+          << ",\"bpm\":" << e.bpm << ",\"when\":\"" << e.when << "\"";
+        const auto it = g.avatars.find(e.avatar);
+        if (it != g.avatars.end()) {
+            f << ",\"avatar_b64\":\"" << Base64Encode(it->second) << "\"";
+        }
+        f << "}" << (i + 1 < g.board.size() ? ",\n" : "\n");
     }
     f << "]\n";
 }
@@ -190,11 +254,18 @@ void LoadBoard() {
         pos += 9;
         const size_t name_end = text.find('"', pos);
         if (name_end == std::string::npos) break;
+        size_t entry_end = text.find('}', name_end);
+        if (entry_end == std::string::npos) entry_end = text.size();
+        const auto field = [&](const char* key) -> size_t {
+            const size_t p = text.find(key, name_end);
+            return p < entry_end ? p : std::string::npos;
+        };
         BoardEntry e;
         e.name = text.substr(pos, name_end - pos);
-        const size_t s = text.find("\"score\":", name_end);
-        const size_t b = text.find("\"bpm\":", name_end);
-        const size_t w = text.find("\"when\":\"", name_end);
+        const size_t s = field("\"score\":");
+        const size_t b = field("\"bpm\":");
+        const size_t w = field("\"when\":\"");
+        const size_t a = field("\"avatar_b64\":\"");
         if (s == std::string::npos) break;
         e.score = atof(text.c_str() + s + 8);
         if (b != std::string::npos) e.bpm = atof(text.c_str() + b + 6);
@@ -202,11 +273,105 @@ void LoadBoard() {
             const size_t w_end = text.find('"', w + 8);
             e.when = text.substr(w + 8, w_end - w - 8);
         }
+        if (a != std::string::npos) {
+            const size_t a_start = a + 14;
+            const size_t a_end = text.find('"', a_start);
+            if (a_end != std::string::npos) {
+                e.avatar = RandomToken().substr(0, 16);
+                g.avatars[e.avatar] = Base64Decode(text.substr(a_start, a_end - a_start));
+            }
+        }
         g.board.push_back(std::move(e));
-        pos = name_end;
+        pos = entry_end;
     }
     std::sort(g.board.begin(), g.board.end(),
               [](const BoardEntry& a, const BoardEntry& b) { return a.score > b.score; });
+}
+
+// --- eye-strip avatars -------------------------------------------------------
+
+// Crop a both-eyes strip from the player's latest frame using the face
+// landmarks captured during the round. Returns JPEG bytes, or "" on failure.
+std::string CropEyeStripLocked() {
+    if (!g.eye_valid || g.jpeg.empty()) return "";
+
+    int w = 0, h = 0, channels = 0;
+    unsigned char* rgb = stbi_load_from_memory(
+        reinterpret_cast<const unsigned char*>(g.jpeg.data()),
+        static_cast<int>(g.jpeg.size()), &w, &h, &channels, 3);
+    if (!rgb) return "";
+
+    // Landmarks may be normalized [0,1] or pixel-space depending on pipeline.
+    double min_x = g.eye_min_x, max_x = g.eye_max_x;
+    double min_y = g.eye_min_y, max_y = g.eye_max_y;
+    if (max_x <= 2.0 && max_y <= 2.0) {
+        min_x *= w; max_x *= w;
+        min_y *= h; max_y *= h;
+    }
+    // pad: a little sideways, generously up/down (brows and bags are character)
+    const double pad_x = (max_x - min_x) * 0.15;
+    const double pad_y = std::max((max_y - min_y) * 0.9, (max_x - min_x) * 0.12);
+    int x0 = std::max(0, static_cast<int>(min_x - pad_x));
+    int x1 = std::min(w, static_cast<int>(max_x + pad_x));
+    int y0 = std::max(0, static_cast<int>(min_y - pad_y));
+    int y1 = std::min(h, static_cast<int>(max_y + pad_y));
+    const int cw = x1 - x0, ch = y1 - y0;
+    if (cw < 24 || ch < 8) {  // degenerate box — refuse to make a 3-pixel soul
+        stbi_image_free(rgb);
+        return "";
+    }
+
+    std::vector<uint8_t> crop(static_cast<size_t>(cw) * ch * 3);
+    for (int y = 0; y < ch; ++y) {
+        memcpy(crop.data() + static_cast<size_t>(y) * cw * 3,
+               rgb + (static_cast<size_t>(y0 + y) * w + x0) * 3,
+               static_cast<size_t>(cw) * 3);
+    }
+    stbi_image_free(rgb);
+
+    std::string jpeg;
+    auto sink = [](void* ctx, void* data, int size) {
+        static_cast<std::string*>(ctx)->append(static_cast<char*>(data), size);
+    };
+    if (!stbi_write_jpg_to_func(sink, &jpeg, cw, ch, 3, crop.data(), 80)) return "";
+    return jpeg;
+}
+
+// MediaPipe-facemesh indices for eye corners/lids and brows. Used when the
+// SDK delivers a dense (>=468 point) mesh; otherwise we fall back to a strip
+// across the upper-middle of the whole-landmark bounding box.
+constexpr int kEyeIdx[] = {33, 133, 159, 145, 263, 362, 386, 374,
+                           70, 63, 105, 66, 107, 300, 293, 334, 296, 336};
+
+void UpdateEyeBoxFromLandmarks(const spectra::Metrics& m, double now) {
+    if (!m.has_face() || m.face().landmarks_size() == 0) return;
+    const auto& lm = m.face().landmarks(m.face().landmarks_size() - 1);
+    const int n = lm.value_size();
+    if (n == 0) return;
+
+    float min_x = 1e9f, max_x = -1e9f, min_y = 1e9f, max_y = -1e9f;
+    if (n >= 468) {
+        for (int idx : kEyeIdx) {
+            const auto& p = lm.value(idx);
+            min_x = std::min(min_x, p.x()); max_x = std::max(max_x, p.x());
+            min_y = std::min(min_y, p.y()); max_y = std::max(max_y, p.y());
+        }
+    } else {
+        for (int i = 0; i < n; ++i) {
+            const auto& p = lm.value(i);
+            min_x = std::min(min_x, p.x()); max_x = std::max(max_x, p.x());
+            min_y = std::min(min_y, p.y()); max_y = std::max(max_y, p.y());
+        }
+        // eyes live roughly 30-50% down the face box, middle ~76% across
+        const float fw = max_x - min_x, fh = max_y - min_y;
+        min_x += fw * 0.12f; max_x -= fw * 0.12f;
+        const float top = min_y + fh * 0.30f, bot = min_y + fh * 0.50f;
+        min_y = top; max_y = bot;
+    }
+    g.eye_min_x = min_x; g.eye_max_x = max_x;
+    g.eye_min_y = min_y; g.eye_max_y = max_y;
+    g.eye_valid = true;
+    g.eye_t = now;
 }
 
 // --- game state machine ------------------------------------------------------
@@ -218,20 +383,68 @@ void ResetToIdleLocked() {
     g.jpeg.clear();
     g.final_score = -1;
     g.final_rank = -1;
+    g.final_best = -1;
+    g.final_avatar.clear();
+    g.eye_valid = false;
+}
+
+bool SameName(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (tolower(static_cast<unsigned char>(a[i])) !=
+            tolower(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
 }
 
 void EndRoundLocked(double now) {
     g.final_score = now - g.stare_start;
     g.final_bpm = g.bpm_n > 0 ? g.bpm_sum / g.bpm_n : 0;
 
-    BoardEntry e{g.player, g.final_score, g.final_bpm, TodayIso()};
-    g.board.push_back(e);
+    // freeze the player's eyes at the moment of the fatal blink
+    std::string avatar_id;
+    if (g.want_eyes && now - g.eye_t < 2.0) {
+        const std::string jpeg = CropEyeStripLocked();
+        if (!jpeg.empty()) {
+            avatar_id = RandomToken().substr(0, 16);
+            g.avatars[avatar_id] = jpeg;
+        }
+    }
+    g.final_avatar = avatar_id;
+
+    // one profile per name: keep the best score, always refresh eyes and date
+    BoardEntry* mine = nullptr;
+    for (auto& e : g.board) {
+        if (SameName(e.name, g.player)) { mine = &e; break; }
+    }
+    if (mine) {
+        g.final_best = std::max(mine->score, g.final_score);
+        if (g.final_score > mine->score) {
+            mine->score = g.final_score;
+            mine->bpm = g.final_bpm;
+        }
+        if (!avatar_id.empty()) {
+            g.avatars.erase(mine->avatar);
+            mine->avatar = avatar_id;
+        } else if (!g.want_eyes && !mine->avatar.empty()) {
+            // player revoked consent this round — take their eyes off the board
+            g.avatars.erase(mine->avatar);
+            mine->avatar.clear();
+        }
+        mine->when = TodayIso();
+    } else {
+        g.final_best = g.final_score;
+        g.board.push_back({g.player, g.final_score, g.final_bpm, TodayIso(), avatar_id});
+    }
     std::sort(g.board.begin(), g.board.end(),
               [](const BoardEntry& a, const BoardEntry& b) { return a.score > b.score; });
-    if (g.board.size() > 100) g.board.resize(100);
+    while (g.board.size() > 100) {
+        g.avatars.erase(g.board.back().avatar);
+        g.board.pop_back();
+    }
     g.final_rank = 1;
     for (size_t i = 0; i < g.board.size(); ++i) {
-        if (g.board[i].score == g.final_score && g.board[i].name == g.player) {
+        if (SameName(g.board[i].name, g.player)) {
             g.final_rank = static_cast<int>(i) + 1;
             break;
         }
@@ -314,6 +527,11 @@ void OnMetrics(const spectra::Metrics& m, int64_t /*timestamp_us*/) {
     }
     while (g.trace.size() > 1500) g.trace.pop_front();
 
+    // eye region for the avatar crop (only worth tracking mid-session)
+    if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
+        UpdateEyeBoxFromLandmarks(m, now);
+    }
+
     // blinks: rising edges of the per-frame detection flag end the round
     if (m.has_face() && m.face().blinking_size() > 0) {
         for (int i = 0; i < m.face().blinking_size(); ++i) {
@@ -331,9 +549,11 @@ std::string BoardJsonLocked(int top_n) {
     const int n = std::min<int>(top_n, static_cast<int>(g.board.size()));
     for (int i = 0; i < n; ++i) {
         const auto& e = g.board[i];
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s{\"name\":\"%s\",\"score\":%.2f,\"bpm\":%.0f,\"when\":\"%s\"}",
-                 i ? "," : "", JsonEscape(e.name).c_str(), e.score, e.bpm, e.when.c_str());
+        char buf[320];
+        snprintf(buf, sizeof(buf),
+                 "%s{\"name\":\"%s\",\"score\":%.2f,\"bpm\":%.0f,\"when\":\"%s\",\"avatar\":\"%s\"}",
+                 i ? "," : "", JsonEscape(e.name).c_str(), e.score, e.bpm, e.when.c_str(),
+                 e.avatar.c_str());
         json += buf;
     }
     return json + "]";
@@ -350,11 +570,11 @@ std::string GameJsonLocked(double now) {
                                                       : 0;
     snprintf(buf, sizeof(buf),
              "\"phase\":\"%s\",\"player\":\"%s\",\"countdown\":%.1f,\"stare_t\":%.2f,"
-             "\"score\":%.2f,\"rank\":%d,\"avg_bpm\":%.0f,"
+             "\"score\":%.2f,\"rank\":%d,\"avg_bpm\":%.0f,\"best\":%.2f,\"avatar\":\"%s\","
              "\"bpm\":%.1f,\"bpm_stable\":%s,\"br\":%.1f,"
              "\"blink_ago\":%.2f,\"hint\":\"%s\"",
              PhaseName(g.phase), JsonEscape(g.player).c_str(), countdown_left, stare_t,
-             g.final_score, g.final_rank, g.final_bpm,
+             g.final_score, g.final_rank, g.final_bpm, g.final_best, g.final_avatar.c_str(),
              g.bpm, g.bpm_stable ? "true" : "false", g.br,
              g.last_blink_t < 0 ? -1.0 : now - g.last_blink_t, JsonEscape(g.hint).c_str());
     return buf;
@@ -410,6 +630,13 @@ int main(int argc, char** argv) {
                 g.bpm = 70 + 8 * std::sin(now / 5);
                 g.bpm_stable = true;
                 if (g.phase == Phase::kStaring) { g.bpm_sum += g.bpm; ++g.bpm_n; }
+                if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
+                    // pretend the eyes sit in a centered strip of the frame
+                    g.eye_min_x = 0.30f; g.eye_max_x = 0.70f;
+                    g.eye_min_y = 0.38f; g.eye_max_y = 0.48f;
+                    g.eye_valid = true;
+                    g.eye_t = now;
+                }
                 g.trace.push_back({now, std::sin(now * 7) + 0.3 * std::sin(now * 23)});
                 while (g.trace.size() > 1500) g.trace.pop_front();
             }
@@ -423,6 +650,7 @@ int main(int argc, char** argv) {
             MetricType::PULSE_RATE,
             MetricType::ARTERIAL_PRESSURE_TRACE,
             MetricType::BLINKING,
+            MetricType::FACE_LANDMARKS,
         });
 
         smart_spectra = std::make_unique<spectra::SmartSpectra>(std::move(config));
@@ -463,7 +691,11 @@ int main(int argc, char** argv) {
             if (end != std::string::npos) name = req.body.substr(k + 8, end - k - 8);
         }
         if (name.size() > 16) name.resize(16);
+        name.erase(std::remove_if(name.begin(), name.end(),
+                                  [](char c) { return c == '{' || c == '}'; }),
+                   name.end());
         if (name.empty()) name = "anonymous";
+        const bool want_eyes = req.body.find("\"eyes\":false") == std::string::npos;
 
         const double now = NowSeconds();
         std::lock_guard<std::mutex> lock(g.mu);
@@ -480,6 +712,7 @@ int main(int argc, char** argv) {
         g.last_frame_t = now;
         g.token = RandomToken();
         g.player = name;
+        g.want_eyes = want_eyes;
         g.ts_init = false;
         g.prev_blink_detected = false;
         res.set_content("{\"token\":\"" + g.token + "\",\"countdown\":5}", "application/json");
@@ -563,6 +796,18 @@ int main(int argc, char** argv) {
             ResetToIdleLocked();
         }
         res.set_content("{\"ok\":true}", "application/json");
+    });
+
+    server.Get("/avatar", [](const httplib::Request& req, httplib::Response& res) {
+        const std::string id = req.get_param_value("id");
+        std::lock_guard<std::mutex> lock(g.mu);
+        const auto it = g.avatars.find(id);
+        if (it == g.avatars.end()) {
+            res.status = 404;
+            return;
+        }
+        res.set_header("Cache-Control", "public, max-age=31536000, immutable");
+        res.set_content(it->second, "image/jpeg");
     });
 
     server.Get("/stream", [](const httplib::Request&, httplib::Response& res) {

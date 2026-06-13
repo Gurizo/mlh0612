@@ -16,6 +16,11 @@ player's camera and timer live.
 - 👁 blink detection ends the round — the SDK is the referee, no honor system
 - ❤️ live pulse rate (BPM) on the game HUD, average BPM on the leaderboard
 - 🏆 persistent leaderboard (JSON file), live spectator view, busy lobby states
+- 👀 **eye-strip profiles**: with your consent, the SDK's face landmarks crop a
+  tiny strip of *just your eyes* from the frame at the moment of your fatal
+  blink — that becomes your leaderboard avatar. One profile per name: replays
+  keep your best score and refresh your eyes. Opt out and you get the eyeless
+  ✕ ✕ default; opting out on a later round takes your eyes back off the board.
 
 ## How it works
 
@@ -37,6 +42,12 @@ phone/laptop browser                      C++ server (this repo)
 One subtlety: SmartSpectra requires strictly monotonic frame timestamps with
 no >2 s gaps, so the server maps each player's `performance.now()` clock onto
 a virtual SDK clock that compresses the idle time between rounds.
+
+Eye avatars use the SDK's `FACE_LANDMARKS` metric: on a dense (468-point)
+mesh the eye/brow landmark indices bound the crop; sparser meshes fall back
+to the upper-middle band of the landmark bounding box. Only the cropped eye
+strip is ever stored (base64 inside `leaderboard.json`) — full frames are
+never persisted.
 
 No frameworks — two single-header libraries
 ([cpp-httplib](https://github.com/yhirose/cpp-httplib),
