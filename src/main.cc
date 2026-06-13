@@ -689,7 +689,10 @@ int main(int argc, char** argv) {
         const double now = NowSeconds();
         std::lock_guard<std::mutex> lock(g.mu);
         TickLocked(now);
-        if (g.phase != Phase::kIdle) {
+        // Only an active round (countdown/staring) blocks a new join. A finished
+        // round (kDone) is just lingering on the result screen — let the next
+        // player (or "go again") start immediately instead of waiting it out.
+        if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
             res.status = 409;
             res.set_content("{\"error\":\"busy\",\"player\":\"" + JsonEscape(g.player) + "\"}",
                             "application/json");
