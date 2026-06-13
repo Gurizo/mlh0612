@@ -348,9 +348,9 @@ addEventListener('pagehide', () => {
 // ---------- share ----------
 $('share-btn').onclick = async () => {
   if (!lastResult) return;
-  const pct = lastResult.topPct ? ` — top ${lastResult.topPct}% of dry eyes` : '';
-  const text = `I lasted ${lastResult.score.toFixed(2)}s in EYE FIGHT 👁 before I blinked${pct}. ` +
-               `Think your eyes are drier? ${location.origin}`;
+  const pct = lastResult.topPct ? ` — top ${lastResult.topPct}% of stare-fighters` : '';
+  const text = `I held my eyes open for ${lastResult.score.toFixed(2)}s in EYE FIGHT 👁${pct}. ` +
+               `Can you hold out longer than me? ${location.origin}`;
   try {
     const data = { text };
     if (lastResult.avatar && navigator.canShare) {
