@@ -1,5 +1,5 @@
 #!/bin/bash
-# Optional: re-sign the doomstare binary with your Apple Development identity.
+# Optional: re-sign the eyefight binary with your Apple Development identity.
 #
 # On Apple Silicon the linker ad-hoc signs binaries automatically, which is
 # enough for the SmartSpectra API-key flow — you normally don't need this.
@@ -8,7 +8,7 @@
 # that lack one.
 set -euo pipefail
 
-BINARY="${1:-build/doomstare}"
+BINARY="${1:-build/eyefight}"
 
 IDENTITY=$(security find-identity -v -p codesigning | grep "Apple Development" | head -1 | sed 's/.*"\(.*\)"/\1/')
 if [[ -z "$IDENTITY" ]]; then

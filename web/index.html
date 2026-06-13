@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-<title>DOOMSTARE — the staring contest your vitals can't lie about</title>
+<title>EYE FIGHT — the staring contest with a computer-vision referee</title>
 <style>
   :root {
     --bg: #0b0e14; --panel: #131826; --panel2: #1a2133; --border: #232c44;
@@ -90,15 +90,14 @@
 </style>
 </head>
 <body>
-<h1>D<span class="eye">👁</span><span class="eye">👁</span>MSTARE</h1>
-<p class="tagline">the staring contest your vitals can't lie about · don't blink</p>
+<h1>EYE F<span class="eye">👁</span>GHT</h1>
+<p class="tagline">the staring contest with a computer-vision referee · don't blink</p>
 
 <!-- ============ LOBBY ============ -->
 <div id="screen-lobby" class="screen active">
   <div class="panel" id="live-banner">
     <div class="label">live now</div>
-    <div><span class="who" id="live-name"></span> is staring… <b id="live-timer">0.0</b>s
-      <span id="live-bpm"></span></div>
+    <div><span class="who" id="live-name"></span> is staring… <b id="live-timer">0.0</b>s</div>
     <img id="spectate" alt="">
   </div>
 
@@ -114,7 +113,7 @@
   <div class="panel">
     <div class="label">hall of dry eyes</div>
     <table id="board">
-      <thead><tr><th></th><th></th><th>name</th><th style="text-align:right">time</th><th style="text-align:right">♥bpm</th></tr></thead>
+      <thead><tr><th></th><th></th><th>name</th><th style="text-align:right">time</th></tr></thead>
       <tbody></tbody>
     </table>
     <div class="empty" id="board-empty">no champions yet — be the first</div>
@@ -126,7 +125,6 @@
   <div class="cam-wrap">
     <video id="cam" autoplay playsinline muted></video>
     <div class="chips">
-      <span class="chip">♥ <span id="g-bpm">--</span> bpm</span>
       <span class="chip" id="g-blink">👁 ready</span>
     </div>
     <div class="hud">
@@ -144,12 +142,12 @@
   <div class="panel">
     <div class="label" id="r-label">you blinked</div>
     <div class="result-score" id="r-score">0.0s</div>
-    <div class="result-sub">avg <span class="pulse-heart">♥</span> <span id="r-bpm">--</span> bpm while staring</div>
     <div class="result-rank" id="r-rank"></div>
     <img class="fallen-eyes" id="r-eyes" alt="your eyes at the fatal blink" style="display:none">
     <div class="result-sub" id="r-best" style="display:none"></div>
   </div>
   <button id="again-btn">GO AGAIN 👁</button>
+  <button class="ghost" id="share-btn">share my dry eyes 📤</button>
   <button class="ghost" id="home-btn">back to lobby</button>
   <div class="panel">
     <div class="label">hall of dry eyes</div>
@@ -180,7 +178,6 @@ es.onmessage = e => {
     $('live-name').textContent = m.player;
     $('live-timer').textContent = m.phase === 'staring' ? m.stare_t.toFixed(1)
                                 : m.phase === 'done' ? m.score.toFixed(1) : '0.0';
-    $('live-bpm').textContent = m.bpm > 0 ? ` · ♥ ${Math.round(m.bpm)} bpm` : '';
     if (!$('spectate').src) $('spectate').src = '/stream';
   } else if ($('spectate').src) {
     $('spectate').removeAttribute('src');
@@ -197,8 +194,7 @@ function renderBoard(tbody, board) {
     `<td class="eyes">${e.avatar
       ? `<img class="eye-strip" src="/avatar?id=${e.avatar}" alt="">`
       : `<span class="no-eyes">✕ ✕</span>`}</td>` +
-    `<td>${esc(e.name)}</td><td class="score">${e.score.toFixed(2)}s</td>` +
-    `<td class="bpm">${e.bpm > 0 ? Math.round(e.bpm) : '–'}</td></tr>`).join('');
+    `<td>${esc(e.name)}</td><td class="score">${e.score.toFixed(2)}s</td></tr>`).join('');
 }
 const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
@@ -236,7 +232,7 @@ async function play() {
     sendLoop();
   } catch (e) {
     $('err').textContent = e.name === 'NotAllowedError'
-      ? 'camera permission denied — DOOMSTARE needs your eyes'
+      ? 'camera permission denied — EYE FIGHT needs your eyes'
       : (e.message || 'something broke');
     $('err').style.display = 'block';
   }
@@ -252,6 +248,26 @@ function stopCam() {
 addEventListener('pagehide', () => {
   if (token) navigator.sendBeacon('/api/leave?token=' + token);
 });
+
+// ---------- share ----------
+$('share-btn').onclick = async () => {
+  if (!lastResult) return;
+  const text = `I lasted ${lastResult.score.toFixed(2)}s in EYE FIGHT 👁 before I blinked. ` +
+               `Think your eyes are drier? ${location.origin}`;
+  try {
+    const data = { text };
+    if (lastResult.avatar && navigator.canShare) {
+      const blob = await fetch('/avatar?id=' + lastResult.avatar).then(r => r.blob());
+      const file = new File([blob], 'my-dry-eyes.png', { type: blob.type });
+      if (navigator.canShare({ files: [file] })) { data.files = [file]; data.title = 'EYE FIGHT'; }
+    }
+    if (navigator.share) { await navigator.share(data); return; }
+  } catch (e) {
+    if (e.name === 'AbortError') return;  // user closed the share sheet
+  }
+  // no Web Share API (desktop browsers): open an X post instead
+  window.open('https://twitter.com/intent/tweet?text=' + encodeURIComponent(text), '_blank');
+};
 
 // ---------- frame pump: camera -> server -> SmartSpectra ----------
 async function sendLoop() {
@@ -283,9 +299,8 @@ async function sendLoop() {
   sending = false;
 }
 
-let lastBlinkAgo = -1;
+let lastBlinkAgo = -1, lastResult = null;
 function onGameState(m) {
-  $('g-bpm').textContent = m.bpm > 0 ? Math.round(m.bpm) : '--';
   $('hint-bar').textContent = m.hint || '';
 
   if (m.blink_ago >= 0 && m.blink_ago < 0.5 && lastBlinkAgo !== m.blink_ago) {
@@ -311,10 +326,10 @@ function onGameState(m) {
   } else if (m.phase === 'done') {
     token = null;
     stopCam();
+    lastResult = m;
     $('r-label').textContent = m.reason === 'lost'
       ? 'your eyes left the arena' : 'you blinked';
     $('r-score').textContent = m.score.toFixed(2) + 's';
-    $('r-bpm').textContent = m.avg_bpm > 0 ? Math.round(m.avg_bpm) : '--';
     $('r-rank').innerHTML = m.rank === 1 ? '👑 <b>NEW CHAMPION</b>'
                           : m.rank > 0 ? `rank <b>#${m.rank}</b> in the hall of dry eyes` : '';
     $('r-eyes').style.display = m.avatar ? 'block' : 'none';

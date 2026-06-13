@@ -1,10 +1,10 @@
-// doomstare: a staring-contest game where your vitals snitch on you.
+// eyefight: a staring-contest game refereed by computer vision.
 // Built on the Presage SmartSpectra C++ SDK.
 //
 // Any browser (phone/laptop) captures its own camera via getUserMedia and
 // streams JPEG frames to this server, which pushes them into SmartSpectra via
-// CustomInput. The SDK's per-frame blink detection ends the round; pulse rate
-// is shown live. Scores persist to a JSON leaderboard.
+// CustomInput. The SDK's per-frame blink detection ends the round. Scores
+// persist to a JSON leaderboard with eye-crop avatars.
 //
 //   GET  /            — game UI (web/index.html)
 //   GET  /stream      — MJPEG re-broadcast of the current player (spectators)
@@ -14,7 +14,7 @@
 //   POST /api/leave   — ?token=... forfeits / ends the session
 //
 // Usage:
-//   ./doomstare --api_key=YOUR_KEY [--port=8428] [--web_root=web]
+//   ./eyefight --api_key=YOUR_KEY [--port=8428] [--web_root=web]
 
 #include <algorithm>
 #include <chrono>
@@ -83,12 +83,9 @@ std::string JsonEscape(const std::string& in) {
     return out;
 }
 
-struct TracePoint { double t, v; };
-
 struct BoardEntry {
     std::string name;
     double score = 0;     // best staring time, seconds
-    double bpm = 0;       // average pulse during that stare (0 = no signal)
     std::string when;     // ISO date of last play
     std::string avatar;   // id into g.avatars ("" = eyeless default profile)
 };
@@ -108,14 +105,8 @@ const char* PhaseName(Phase p) {
 struct GameState {
     std::mutex mu;
 
-    // vitals from the SDK
-    double bpm = 0;
-    bool bpm_stable = false;
-    double br = 0;
+    // from the SDK
     std::string hint;
-    std::deque<TracePoint> trace;
-    bool have_cardio_trace = false;
-    std::string trace_kind = "breathing";
     bool prev_blink_detected = false;
     double last_blink_t = -1;
 
@@ -131,10 +122,7 @@ struct GameState {
     double phase_start = 0;
     double stare_start = 0;
     double last_frame_t = 0;
-    double bpm_sum = 0;
-    int bpm_n = 0;
     double final_score = -1;
-    double final_bpm = 0;
     int final_rank = -1;
     double final_best = -1;
     std::string final_avatar;
@@ -239,7 +227,7 @@ void SaveBoardLocked() {
     for (size_t i = 0; i < g.board.size(); ++i) {
         const auto& e = g.board[i];
         f << "  {\"name\":\"" << JsonEscape(e.name) << "\",\"score\":" << e.score
-          << ",\"bpm\":" << e.bpm << ",\"when\":\"" << e.when << "\"";
+          << ",\"when\":\"" << e.when << "\"";
         const auto it = g.avatars.find(e.avatar);
         if (it != g.avatars.end()) {
             f << ",\"avatar_b64\":\"" << Base64Encode(it->second) << "\"";
@@ -268,12 +256,10 @@ void LoadBoard() {
         BoardEntry e;
         e.name = text.substr(pos, name_end - pos);
         const size_t s = field("\"score\":");
-        const size_t b = field("\"bpm\":");
         const size_t w = field("\"when\":\"");
         const size_t a = field("\"avatar_b64\":\"");
         if (s == std::string::npos) break;
         e.score = atof(text.c_str() + s + 8);
-        if (b != std::string::npos) e.bpm = atof(text.c_str() + b + 6);
         if (w != std::string::npos) {
             const size_t w_end = text.find('"', w + 8);
             e.when = text.substr(w + 8, w_end - w - 8);
@@ -433,7 +419,6 @@ bool SameName(const std::string& a, const std::string& b) {
 void EndRoundLocked(double now, const char* reason) {
     g.end_reason = reason;
     g.final_score = std::max(0.0, now - g.stare_start);
-    g.final_bpm = g.bpm_n > 0 ? g.bpm_sum / g.bpm_n : 0;
 
     // freeze the player's eyes at the moment of the fatal blink
     std::string avatar_id;
@@ -453,10 +438,7 @@ void EndRoundLocked(double now, const char* reason) {
     }
     if (mine) {
         g.final_best = std::max(mine->score, g.final_score);
-        if (g.final_score > mine->score) {
-            mine->score = g.final_score;
-            mine->bpm = g.final_bpm;
-        }
+        if (g.final_score > mine->score) mine->score = g.final_score;
         if (!avatar_id.empty()) {
             g.avatars.erase(mine->avatar);
             mine->avatar = avatar_id;
@@ -468,7 +450,7 @@ void EndRoundLocked(double now, const char* reason) {
         mine->when = TodayIso();
     } else {
         g.final_best = g.final_score;
-        g.board.push_back({g.player, g.final_score, g.final_bpm, TodayIso(), avatar_id});
+        g.board.push_back({g.player, g.final_score, TodayIso(), avatar_id});
     }
     std::sort(g.board.begin(), g.board.end(),
               [](const BoardEntry& a, const BoardEntry& b) { return a.score > b.score; });
@@ -500,8 +482,6 @@ void TickLocked(double now) {
                 g.phase = Phase::kStaring;
                 g.phase_start = now;
                 g.stare_start = now;
-                g.bpm_sum = 0;
-                g.bpm_n = 0;
             }
             if (now - g.last_frame_t > kSessionTimeoutSeconds ||
                 now - g.phase_start > kCountdownMaxSeconds) {
@@ -537,41 +517,6 @@ void OnMetrics(const spectra::Metrics& m, int64_t /*timestamp_us*/) {
     std::lock_guard<std::mutex> lock(g.mu);
     TickLocked(now);
 
-    if (m.has_cardio() && m.cardio().pulse_rate_size() > 0) {
-        const auto& pulse = m.cardio().pulse_rate(m.cardio().pulse_rate_size() - 1);
-        if (pulse.value() > 0) {
-            g.bpm = pulse.value();
-            g.bpm_stable = pulse.stable();
-            if (g.phase == Phase::kStaring) {
-                g.bpm_sum += g.bpm;
-                ++g.bpm_n;
-            }
-        }
-    }
-    if (m.has_breathing() && m.breathing().rate_size() > 0) {
-        const auto& rate = m.breathing().rate(m.breathing().rate_size() - 1);
-        if (rate.value() > 0) g.br = rate.value();
-    }
-
-    // waveform: prefer the cardiac pressure trace once it produces samples
-    if (m.has_cardio() && m.cardio().arterial_pressure_trace_size() > 0) {
-        if (!g.have_cardio_trace) {
-            g.have_cardio_trace = true;
-            g.trace_kind = "pulse";
-            g.trace.clear();
-        }
-        for (int i = 0; i < m.cardio().arterial_pressure_trace_size(); ++i) {
-            const auto& s = m.cardio().arterial_pressure_trace(i);
-            g.trace.push_back({s.timestamp() / 1e6, s.value()});
-        }
-    } else if (!g.have_cardio_trace && m.has_breathing() && m.breathing().upper_trace_size() > 0) {
-        for (int i = 0; i < m.breathing().upper_trace_size(); ++i) {
-            const auto& s = m.breathing().upper_trace(i);
-            g.trace.push_back({s.timestamp() / 1e6, s.value()});
-        }
-    }
-    while (g.trace.size() > 1500) g.trace.pop_front();
-
     // face presence: landmarks and blink samples are frame-driven, so their
     // arrival means the SDK currently sees a face
     if (m.has_face() && (m.face().landmarks_size() > 0 || m.face().blinking_size() > 0)) {
@@ -602,8 +547,8 @@ std::string BoardJsonLocked(int top_n) {
         const auto& e = g.board[i];
         char buf[320];
         snprintf(buf, sizeof(buf),
-                 "%s{\"name\":\"%s\",\"score\":%.2f,\"bpm\":%.0f,\"when\":\"%s\",\"avatar\":\"%s\"}",
-                 i ? "," : "", JsonEscape(e.name).c_str(), e.score, e.bpm, e.when.c_str(),
+                 "%s{\"name\":\"%s\",\"score\":%.2f,\"when\":\"%s\",\"avatar\":\"%s\"}",
+                 i ? "," : "", JsonEscape(e.name).c_str(), e.score, e.when.c_str(),
                  e.avatar.c_str());
         json += buf;
     }
@@ -621,35 +566,21 @@ std::string GameJsonLocked(double now) {
                                                       : 0;
     snprintf(buf, sizeof(buf),
              "\"phase\":\"%s\",\"player\":\"%s\",\"countdown\":%.1f,\"stare_t\":%.2f,"
-             "\"score\":%.2f,\"rank\":%d,\"avg_bpm\":%.0f,\"best\":%.2f,\"avatar\":\"%s\","
+             "\"score\":%.2f,\"rank\":%d,\"best\":%.2f,\"avatar\":\"%s\","
              "\"reason\":\"%s\",\"face\":%s,"
-             "\"bpm\":%.1f,\"bpm_stable\":%s,\"br\":%.1f,"
              "\"blink_ago\":%.2f,\"hint\":\"%s\"",
              PhaseName(g.phase), JsonEscape(g.player).c_str(), countdown_left, stare_t,
-             g.final_score, g.final_rank, g.final_bpm, g.final_best, g.final_avatar.c_str(),
+             g.final_score, g.final_rank, g.final_best, g.final_avatar.c_str(),
              g.end_reason.c_str(), now - g.face_t < kFaceFreshSeconds ? "true" : "false",
-             g.bpm, g.bpm_stable ? "true" : "false", g.br,
              g.last_blink_t < 0 ? -1.0 : now - g.last_blink_t, JsonEscape(g.hint).c_str());
     return buf;
 }
 
-std::string BuildEventJson(double& last_trace_t) {
+std::string BuildEventJson() {
     const double now = NowSeconds();
     std::lock_guard<std::mutex> lock(g.mu);
     TickLocked(now);
-
-    std::string json = "{" + GameJsonLocked(now) + ",\"board\":" + BoardJsonLocked(10) + ",\"trace\":[";
-    bool first = true;
-    for (const auto& p : g.trace) {
-        if (p.t <= last_trace_t) continue;
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s[%.3f,%.4f]", first ? "" : ",", p.t, p.v);
-        json += buf;
-        first = false;
-        last_trace_t = p.t;
-    }
-    json += "],\"trace_kind\":\"" + g.trace_kind + "\"}";
-    return json;
+    return "{" + GameJsonLocked(now) + ",\"board\":" + BoardJsonLocked(10) + "}";
 }
 
 }  // namespace
@@ -680,9 +611,6 @@ int main(int argc, char** argv) {
                 const double now = NowSeconds();
                 std::lock_guard<std::mutex> lock(g.mu);
                 TickLocked(now);
-                g.bpm = 70 + 8 * std::sin(now / 5);
-                g.bpm_stable = true;
-                if (g.phase == Phase::kStaring) { g.bpm_sum += g.bpm; ++g.bpm_n; }
                 if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
                     // pretend two eyes sit either side of the frame center
                     g.eyes[0] = {0.40f, 0.43f, 0.10f, 0.06f};
@@ -692,8 +620,6 @@ int main(int argc, char** argv) {
                     // a face is "seen" as long as frames keep arriving
                     g.face_t = g.last_frame_t;
                 }
-                g.trace.push_back({now, std::sin(now * 7) + 0.3 * std::sin(now * 23)});
-                while (g.trace.size() > 1500) g.trace.pop_front();
             }
         });
         fake_pulse.detach();
@@ -702,8 +628,6 @@ int main(int argc, char** argv) {
         config.api_key = api_key;
         config.requested_metrics = spectra::SmartSpectraConfig::BreathingMetrics();
         config.AddMetrics({
-            MetricType::PULSE_RATE,
-            MetricType::ARTERIAL_PRESSURE_TRACE,
             MetricType::BLINKING,
             MetricType::FACE_LANDMARKS,
         });
@@ -898,8 +822,8 @@ int main(int argc, char** argv) {
     server.Get("/events", [](const httplib::Request&, httplib::Response& res) {
         res.set_chunked_content_provider(
             "text/event-stream",
-            [last_trace_t = 0.0](size_t, httplib::DataSink& sink) mutable {
-                const std::string payload = "data: " + BuildEventJson(last_trace_t) + "\n\n";
+            [](size_t, httplib::DataSink& sink) {
+                const std::string payload = "data: " + BuildEventJson() + "\n\n";
                 if (!sink.write(payload.data(), payload.size())) return false;
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 return true;
@@ -907,7 +831,7 @@ int main(int argc, char** argv) {
     });
 
     const int port = absl::GetFlag(FLAGS_port);
-    printf("DOOMSTARE arena open — http://localhost:%d (Ctrl+C to stop)\n", port);
+    printf("EYE FIGHT arena open — http://localhost:%d (Ctrl+C to stop)\n", port);
     printf("Phones need HTTPS for camera access; see README for the tunnel one-liner.\n");
     server.listen(absl::GetFlag(FLAGS_host), port);
 
