@@ -66,6 +66,8 @@ constexpr double kCountdownSeconds = 3.0;
 constexpr double kBlinkGraceSeconds = 0.5;   // ignore blink edges right at round start
 constexpr double kSessionTimeoutSeconds = 6; // no frames -> player vanished
 constexpr double kDoneLingerSeconds = 12;    // result shown before lobby reopens
+constexpr int kFrameDim = 480;               // every frame must be exactly this square;
+                                             // the SDK's optical flow spans the whole stream
 constexpr double kFaceFreshSeconds = 1.0;    // face required this recently to start staring
 constexpr double kFaceLostSeconds = 1.2;     // face gone this long mid-stare -> round over
 constexpr double kCountdownMaxSeconds = 25;  // never showed a face -> back to lobby
@@ -766,23 +768,32 @@ int main(int argc, char** argv) {
             return;
         }
 
+        // Every frame fed to the SDK must be exactly kFrameDim square. The
+        // optical-flow tracker runs continuously across the whole stream and
+        // never resets between players, so a differently-sized frame (a stale
+        // client, or just the next player's phone) would crash it. Drop anything
+        // that isn't the expected size — globally, not per-session.
+        if (w != kFrameDim || h != kFrameDim) {
+            static int logged = 0;
+            if (logged++ < 5) fprintf(stderr, "[frame] dropped wrong size %dx%d (need %dx%d)\n",
+                                      w, h, kFrameDim, kFrameDim);
+            stbi_image_free(rgb);
+            res.set_content("{\"ok\":1}", "application/json");
+            return;
+        }
+
         // Feed the SDK under g_feed_mu so concurrent frames are serialized and
         // stale (out-of-order) frames are dropped — the graph needs strictly
         // increasing timestamps and rejects gaps > 2 s.
         if (input) {
             std::lock_guard<std::mutex> feed(g_feed_mu);
-            if (token != g.feed_token) {            // (re)calibrate for a new session
+            if (token != g.feed_token) {            // (re)calibrate the clock for a new session
                 g.feed_token = token;
                 g.client_first_us = client_us;
                 g.last_client_us = client_us - 1;
                 g.virtual_base_us = g.last_sent_us + 33'000;
-                g.feed_w = w;                        // lock this session's frame size
-                g.feed_h = h;
             }
-            // Feed only in-order frames of the locked size. A size change mid-
-            // stream (mobile orientation/resolution flips) crashes the SDK's
-            // optical-flow tracker, so drop those rather than feed them.
-            if (client_us > g.last_client_us && w == g.feed_w && h == g.feed_h) {
+            if (client_us > g.last_client_us) {     // in order — feed it
                 g.last_client_us = client_us;
                 int64_t ts = g.virtual_base_us + (client_us - g.client_first_us);
                 if (ts - g.last_sent_us > 1'500'000) {  // stall: compress the gap

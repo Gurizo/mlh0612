@@ -273,7 +273,7 @@ if (location.protocol === 'http:' && location.hostname !== 'localhost') {
   location.replace('https://' + location.host + location.pathname + location.search);
 }
 const $ = id => document.getElementById(id);
-const FPS = 15, SEND_W = 480;
+const FPS = 15, SEND_DIM = 480;   // fixed square frame for every player (see sendLoop)
 
 let token = null, stream = null, sending = false, myName = '';
 
@@ -447,18 +447,16 @@ async function sendLoop() {
   const video = $('cam'), canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
   let inFlight = 0;
-  canvas.width = 0;   // frame size is locked on the first frame (see below)
+  // Every frame from every player must be EXACTLY this size. The SDK's
+  // optical-flow tracker runs continuously across the whole stream (it never
+  // resets between players), so any size change — even from a different phone
+  // next round — crashes it. A fixed square also matches the SDK's ROI.
+  canvas.width = SEND_DIM;
+  canvas.height = SEND_DIM;
 
   const tick = setInterval(async () => {
     if (!token) { clearInterval(tick); sending = false; return; }
     if (inFlight >= 4 || video.videoWidth === 0) return;   // don't outrun the link
-    // Lock the output size ONCE. Mobile cameras change resolution/orientation
-    // mid-stream; if frame dimensions vary, the SDK's optical-flow tracker
-    // crashes. A fixed canvas + cover-draw guarantees every frame is identical.
-    if (!canvas.width) {
-      canvas.width = SEND_W;
-      canvas.height = Math.round(SEND_W * video.videoHeight / video.videoWidth / 2) * 2;
-    }
     const vw = video.videoWidth, vh = video.videoHeight;
     const scale = Math.max(canvas.width / vw, canvas.height / vh);  // cover
     const dw = vw * scale, dh = vh * scale;
