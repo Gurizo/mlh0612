@@ -254,6 +254,9 @@ const crown = colorVar =>
   `<span class="podium-crown"><svg viewBox="0 0 24 24" fill="none" stroke="var(${colorVar})" ` +
   `stroke-width="2.4" stroke-linejoin="round"><path d="m2 4 3 12h14l3-12-6 7-4-7-4 7Z"/></svg></span>`;
 const avatarHtml = e => e.avatar ? `<img src="/avatar?id=${e.avatar}" alt="">` : '<span class="ph">✕ ✕</span>';
+// score -> tier byline (echoes the demo's "Level – Diamond" rank flavor)
+const tier = s => s >= 30 ? '💎 Diamond Gaze' : s >= 20 ? 'Platinum Stare'
+                : s >= 12 ? 'Gold Eyes' : s >= 6 ? 'Silver Lids' : 'Bronze Blinker';
 
 function fmtRange(board) {
   const dates = board.map(e => e.when).filter(Boolean).sort();
@@ -280,10 +283,10 @@ function renderLeaderboard(podiumEl, listEl, rangeEl, board) {
     `</div>`;
   }).join('');
 
-  // rankings list: 4th place onward
-  listEl.innerHTML = board.slice(3).map((e, i) => {
-    const rank = i + 4;
-    const byline = (isMe(e.name) ? 'you · ' : '') + (e.when || '');
+  // rankings list: full standings (matches the demo, which lists every rank)
+  listEl.innerHTML = board.map((e, i) => {
+    const rank = i + 1;
+    const byline = (isMe(e.name) ? 'you · ' : '') + tier(e.score);
     return `<div class="lb-row${isMe(e.name) ? ' me' : ''}">` +
       `<div class="lb-rank">${rank}</div>` +
       `<div class="lb-eyes${e.avatar ? '' : ' empty'}">${avatarHtml(e)}</div>` +
