@@ -140,9 +140,12 @@ struct GameState {
     std::map<std::string, std::string> avatars;
 
     // virtual-clock mapping for CustomInput (compresses idle gaps; the SDK
-    // rejects forward timestamp gaps > 2 s and non-monotonic values)
-    bool ts_init = false;
+    // rejects forward timestamp gaps > 2 s and non-monotonic values). Frames
+    // may arrive in parallel/out-of-order over the tunnel, so these are guarded
+    // by g_feed_mu (not g.mu) and a stale frame is dropped to keep Send() monotonic.
+    std::string feed_token;        // session the clock below is calibrated to
     int64_t client_first_us = 0;
+    int64_t last_client_us = 0;    // newest client timestamp fed to the SDK
     int64_t virtual_base_us = 0;
     int64_t last_sent_us = 0;
 
@@ -150,6 +153,7 @@ struct GameState {
 };
 
 GameState g;
+std::mutex g_feed_mu;  // serializes frame decode-order -> SDK Send (monotonic)
 spectra::SmartSpectra* g_smart_spectra = nullptr;
 httplib::Server* g_server = nullptr;
 
@@ -705,7 +709,6 @@ int main(int argc, char** argv) {
         g.token = RandomToken();
         g.player = name;
         g.want_eyes = want_eyes;
-        g.ts_init = false;
         g.prev_blink_detected = false;
         res.set_content("{\"token\":\"" + g.token + "\",\"countdown\":" +
                             std::to_string(static_cast<int>(kCountdownSeconds)) + "}",
@@ -717,7 +720,6 @@ int main(int argc, char** argv) {
         const int64_t client_us = strtoll(req.get_header_value("X-TS").c_str(), nullptr, 10);
         const double now = NowSeconds();
 
-        int64_t send_us = -1;
         {
             std::lock_guard<std::mutex> lock(g.mu);
             TickLocked(now);
@@ -727,25 +729,11 @@ int main(int argc, char** argv) {
                 return;
             }
             g.last_frame_t = now;
-            g.jpeg = req.body;
+            g.jpeg = req.body;          // newest frame wins for the spectator preview
             ++g.jpeg_seq;
-
-            // map the client's monotonic clock onto our virtual SDK clock
-            if (!g.ts_init) {
-                g.ts_init = true;
-                g.client_first_us = client_us;
-                g.virtual_base_us = g.last_sent_us + 33'000;
-            }
-            int64_t ts = g.virtual_base_us + (client_us - g.client_first_us);
-            if (ts - g.last_sent_us > 1'500'000) {  // stall: compress the gap
-                g.virtual_base_us -= ts - g.last_sent_us - 33'000;
-                ts = g.last_sent_us + 33'000;
-            }
-            if (ts <= g.last_sent_us) ts = g.last_sent_us + 1000;
-            g.last_sent_us = ts;
-            send_us = ts;
         }
 
+        // Decode outside any lock so frames can decode in parallel.
         int w = 0, h = 0, channels = 0;
         unsigned char* rgb = stbi_load_from_memory(
             reinterpret_cast<const unsigned char*>(req.body.data()),
@@ -755,22 +743,43 @@ int main(int argc, char** argv) {
             res.set_content("{\"error\":\"bad jpeg\"}", "application/json");
             return;
         }
+
+        // Feed the SDK under g_feed_mu so concurrent frames are serialized and
+        // stale (out-of-order) frames are dropped — the graph needs strictly
+        // increasing timestamps and rejects gaps > 2 s.
         if (input) {
-            spectra::FrameBuffer frame;
-            frame.data = rgb;
-            frame.width = w;
-            frame.height = h;
-            frame.stride_bytes = w * 3;
-            frame.format = spectra::PixelFormat::kRGB;
-            if (const auto err = input->Send(frame, send_us); !err.ok()) {
-                static int logged = 0;
-                if (logged++ < 10) fprintf(stderr, "Send failed: %s\n", err.message.c_str());
+            std::lock_guard<std::mutex> feed(g_feed_mu);
+            if (token != g.feed_token) {            // (re)calibrate for a new session
+                g.feed_token = token;
+                g.client_first_us = client_us;
+                g.last_client_us = client_us - 1;
+                g.virtual_base_us = g.last_sent_us + 33'000;
             }
+            if (client_us > g.last_client_us) {     // in order — feed it
+                g.last_client_us = client_us;
+                int64_t ts = g.virtual_base_us + (client_us - g.client_first_us);
+                if (ts - g.last_sent_us > 1'500'000) {  // stall: compress the gap
+                    g.virtual_base_us -= ts - g.last_sent_us - 33'000;
+                    ts = g.last_sent_us + 33'000;
+                }
+                if (ts <= g.last_sent_us) ts = g.last_sent_us + 1000;
+                g.last_sent_us = ts;
+                spectra::FrameBuffer frame;
+                frame.data = rgb;
+                frame.width = w;
+                frame.height = h;
+                frame.stride_bytes = w * 3;
+                frame.format = spectra::PixelFormat::kRGB;
+                if (const auto err = input->Send(frame, ts); !err.ok()) {
+                    static int logged = 0;
+                    if (logged++ < 10) fprintf(stderr, "Send failed: %s\n", err.message.c_str());
+                }
+            }
+            // else: arrived late/out of order — drop, keep the SDK clock monotonic
         }
         stbi_image_free(rgb);
 
-        std::lock_guard<std::mutex> lock(g.mu);
-        res.set_content("{" + GameJsonLocked(NowSeconds()) + "}", "application/json");
+        res.set_content("{\"ok\":1}", "application/json");  // UI state comes via SSE
     });
 
     if (fake) {

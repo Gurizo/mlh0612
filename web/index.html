@@ -299,6 +299,10 @@ es.onmessage = e => {
   renderLeaderboard($('podium'), $('board'), $('lb-range'), m.board);
   renderLeaderboard($('podium2'), $('board2'), $('lb-range2'), m.board);
   $('board-empty').style.display = m.board.length ? 'none' : 'block';
+
+  // while we're the active player, the SSE stream (not frame acks) drives the
+  // game/result screen — so the UI stays smooth no matter the upload latency
+  if (token) onGameState(m);
 };
 
 const esc = s => s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -423,33 +427,35 @@ $('share-btn').onclick = async () => {
 };
 
 // ---------- frame pump: camera -> server -> SmartSpectra ----------
+// Fire frames at a steady rate WITHOUT waiting for each response. Over the
+// tunnel a round-trip can take 100-300ms; awaiting it would crush the frame
+// rate and starve blink/face detection. We cap in-flight requests so a slow
+// link just drops frames instead of piling up, and the server reorders by
+// timestamp. Game state arrives separately via SSE.
 async function sendLoop() {
   if (sending) return;
   sending = true;
   const video = $('cam'), canvas = document.createElement('canvas');
   const ctx = canvas.getContext('2d');
+  let inFlight = 0;
 
-  while (token) {
-    const t0 = performance.now();
-    if (video.videoWidth > 0) {
-      canvas.width = SEND_W;
-      canvas.height = Math.round(video.videoHeight * SEND_W / video.videoWidth);
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-      const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.7));
-      try {
-        const r = await fetch('/api/frame?token=' + token, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/octet-stream', 'X-TS': String(Math.round(t0 * 1000)) },
-          body: blob
-        });
-        if (r.status === 410) { token = null; break; }
-        onGameState(await r.json());
-      } catch (_) { /* transient network blip — keep pumping */ }
-    }
-    const elapsed = performance.now() - t0;
-    await new Promise(res => setTimeout(res, Math.max(0, 1000 / FPS - elapsed)));
-  }
-  sending = false;
+  const tick = setInterval(async () => {
+    if (!token) { clearInterval(tick); sending = false; return; }
+    if (inFlight >= 4 || video.videoWidth === 0) return;   // don't outrun the link
+    canvas.width = SEND_W;
+    canvas.height = Math.round(video.videoHeight * SEND_W / video.videoWidth);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.65));
+    if (!token) return;
+    inFlight++;
+    fetch('/api/frame?token=' + token, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-TS': String(Math.round(performance.now() * 1000)) },
+      body: blob
+    }).then(r => { if (r.status === 410) token = null; })
+      .catch(() => { /* transient network blip — keep pumping */ })
+      .finally(() => { inFlight--; });
+  }, 1000 / FPS);
 }
 
 let lastBlinkAgo = -1, lastResult = null;
