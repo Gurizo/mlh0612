@@ -358,7 +358,7 @@ function renderLeaderboard(podiumEl, listEl, rangeEl, board) {
 $('play-btn').onclick = play;
 $('again-btn').onclick = play;
 $('home-btn').onclick = () => show('screen-lobby');
-$('forfeit-btn').onclick = async () => { await leave(); show('screen-lobby'); };
+$('forfeit-btn').onclick = async () => { stopStareTicker(); await leave(); show('screen-lobby'); };
 $('name').onkeydown = e => { if (e.key === 'Enter') play(); };
 
 async function play() {
@@ -475,6 +475,22 @@ async function sendLoop() {
 }
 
 let lastBlinkAgo = -1, lastResult = null;
+
+// The staring timer ticks LOCALLY (smooth 60fps) instead of showing the
+// server's stare_t, which arrives batched over the tunnel and visibly jumps.
+// We anchor to the server's value once when staring begins, then count with
+// the browser clock; the server stays the source of truth for the final score.
+let stareTimer = null, stareAnchorMs = 0;
+function startStareTicker(serverStareT) {
+  stareAnchorMs = performance.now() - serverStareT * 1000;
+  const paint = () => { $('stare-timer').textContent = ((performance.now() - stareAnchorMs) / 1000).toFixed(1); };
+  paint();
+  stareTimer = setInterval(paint, 50);   // 20fps — smooth for a tenths display
+}
+function stopStareTicker() {
+  if (stareTimer !== null) { clearInterval(stareTimer); stareTimer = null; }
+}
+
 function onGameState(m) {
   $('hint-bar').textContent = m.hint || '';
 
@@ -486,6 +502,7 @@ function onGameState(m) {
   lastBlinkAgo = m.blink_ago;
 
   if (m.phase === 'countdown') {
+    stopStareTicker();
     if (m.countdown <= 0 && !m.face) {
       $('countdown-num').textContent = '👀';
       $('g-msg').textContent = 'show your eyes to begin';
@@ -496,9 +513,10 @@ function onGameState(m) {
   } else if (m.phase === 'staring') {
     $('countdown-num').textContent = '';
     $('stare-timer').style.display = 'block';
-    $('stare-timer').textContent = m.stare_t.toFixed(1);
     $('g-msg').textContent = "DON'T BLINK";
+    if (stareTimer === null) startStareTicker(m.stare_t);  // anchor once, then tick locally
   } else if (m.phase === 'done') {
+    stopStareTicker();
     token = null;
     stopCam();
     lastResult = m;
@@ -532,6 +550,7 @@ function onGameState(m) {
     $('share-btn').style.display = dq ? 'none' : 'block';
     show('screen-result');
   } else if (m.phase === 'idle') {
+    stopStareTicker();
     token = null;
     stopCam();
     show('screen-lobby');
