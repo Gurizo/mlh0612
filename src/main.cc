@@ -61,7 +61,7 @@ ABSL_FLAG(bool, fake, false,
 
 namespace {
 
-constexpr double kCountdownSeconds = 5.0;
+constexpr double kCountdownSeconds = 3.0;
 constexpr double kBlinkGraceSeconds = 0.5;   // ignore blink edges right at round start
 constexpr double kSessionTimeoutSeconds = 6; // no frames -> player vanished
 constexpr double kDoneLingerSeconds = 12;    // result shown before lobby reopens
@@ -715,7 +715,9 @@ int main(int argc, char** argv) {
         g.want_eyes = want_eyes;
         g.ts_init = false;
         g.prev_blink_detected = false;
-        res.set_content("{\"token\":\"" + g.token + "\",\"countdown\":5}", "application/json");
+        res.set_content("{\"token\":\"" + g.token + "\",\"countdown\":" +
+                            std::to_string(static_cast<int>(kCountdownSeconds)) + "}",
+                        "application/json");
     });
 
     server.Post("/api/frame", [&input](const httplib::Request& req, httplib::Response& res) {
