@@ -440,8 +440,21 @@ $('home-btn').onclick = () => show('screen-lobby');
 $('forfeit-btn').onclick = async () => { stopStareTicker(); await leave(); show('screen-lobby'); };
 $('name').onkeydown = e => { if (e.key === 'Enter') play(); };
 
+const NAME_ADJ = ['Sleepy','Dry','Steely','Glassy','Twitchy','Bold','Zen','Wired','Hawk','Owl','Laser','Iron','Wide','Snake','Calm'];
+const NAME_NOUN = ['Gazer','Starer','Cyclops','Owl','Pupil','Blinker','Iris','Watcher','Lash','Squint','Hawk','Lid','Eyeball','Glare'];
+function randomName() {
+  for (let i = 0; i < 20; i++) {
+    const n = NAME_ADJ[Math.floor(Math.random() * NAME_ADJ.length)] +
+              NAME_NOUN[Math.floor(Math.random() * NAME_NOUN.length)] +
+              (Math.random() < 0.4 ? Math.floor(Math.random() * 90 + 10) : '');
+    if (n.length <= 16) return n;
+  }
+  return 'Gazer' + Math.floor(Math.random() * 9000 + 1000);
+}
+
 async function play() {
-  myName = $('name').value.trim() || myName || 'anonymous';
+  myName = $('name').value.trim() || myName || randomName();
+  $('name').value = myName;   // show the assigned name
   $('err').style.display = 'none';
   // Some in-app browsers (KakaoTalk, Instagram, etc.) and insecure origins
   // don't expose the camera API at all — fail with a clear message, not a crash.
