@@ -380,7 +380,12 @@ std::string CropEyesLocked() {
 // MediaPipe-facemesh indices: eye corners and lids, per eye. Used when the
 // SDK delivers a dense (>=468 point) mesh; sparser meshes fall back to two
 // boxes placed heuristically inside the whole-landmark bounding box.
-void UpdateEyeBoxFromLandmarks(const spectra::Metrics& m, double now) {
+//
+// `open` gates the capture: we only snapshot the avatar frame when the eyes are
+// open, so the profile shows open eyes (the round ends on a blink, so the very
+// last frame is always shut). On a blink we keep the previous open-eyed frame.
+void UpdateEyeBoxFromLandmarks(const spectra::Metrics& m, double now, bool open) {
+    if (!open) return;
     if (!m.has_face() || m.face().landmarks_size() == 0) return;
     const auto& lm = m.face().landmarks(m.face().landmarks_size() - 1);
     const int n = lm.value_size();
@@ -574,9 +579,17 @@ void OnMetrics(const spectra::Metrics& m, int64_t /*timestamp_us*/) {
         g.face_t = now;
     }
 
-    // eye region for the avatar crop (only worth tracking mid-session)
+    // Are the eyes open right now? Default to the last known state, override
+    // with this callback's newest blink sample. Used to avoid capturing the
+    // avatar mid-blink.
+    bool open = !g.prev_blink_detected;
+    if (m.has_face() && m.face().blinking_size() > 0) {
+        open = !m.face().blinking(m.face().blinking_size() - 1).detected();
+    }
+
+    // eye region for the avatar crop (only captured while eyes are open)
     if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
-        UpdateEyeBoxFromLandmarks(m, now);
+        UpdateEyeBoxFromLandmarks(m, now, open);
     }
 
     // blinks: rising edges of the per-frame detection flag end the round
