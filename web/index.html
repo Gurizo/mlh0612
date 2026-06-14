@@ -68,9 +68,6 @@
   .screen.active { display: block; }
 
   /* lobby */
-  #live-banner { display: none; border-color: var(--accent); }
-  #live-banner .who { color: var(--accent); font-weight: 700; }
-  #live-banner img { width: 100%; border-radius: 8px; margin-top: 10px; }
   input[type=text] {
     width: 100%; padding: 14px; font: inherit; font-size: 16px; color: var(--text);
     background: var(--panel2); border: 1px solid var(--border); border-radius: 10px; outline: none;
@@ -170,6 +167,24 @@
   .chip .hot { color: var(--accent); }
   #hint-bar { font-size: 12px; color: var(--warn); text-align: center; margin-top: 8px; min-height: 16px; }
 
+  /* spectator "distract" panel + emoji buttons */
+  .distract-sub { font-size: 13px; color: var(--dim); margin: -4px 0 12px; }
+  .emoji-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .emoji-btn { flex: 1 1 0; min-width: 56px; font-size: 30px; line-height: 1; padding: 12px 0;
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; cursor: pointer;
+    transition: transform .08s; }
+  .emoji-btn:active { transform: scale(1.25); border-color: var(--accent); }
+
+  /* flying emojis over the player's camera */
+  .emoji-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+  .flying { position: absolute; bottom: -10px; font-size: 44px; will-change: transform, opacity;
+    animation: flyup 2.4s ease-out forwards; }
+  @keyframes flyup {
+    0%   { transform: translateY(0) scale(.6) rotate(0deg); opacity: 0; }
+    15%  { opacity: 1; }
+    100% { transform: translateY(-78%) scale(1.4) rotate(var(--spin,20deg)); opacity: 0; }
+  }
+
   /* result */
   .result-score { font-family: var(--font-display); font-size: clamp(48px, 16vw, 80px); font-weight: 700; text-align: center; }
   .result-sub { text-align: center; color: var(--dim); margin: 6px 0 2px; }
@@ -204,9 +219,10 @@
 
 <!-- ============ LOBBY ============ -->
 <div id="screen-lobby" class="screen active">
-  <div class="panel" id="live-banner">
-    <div class="label">live now</div>
-    <div><span class="who" id="live-name"></span> is staring… <b id="live-timer">0.0</b>s</div>
+  <div class="panel" id="distract" style="display:none">
+    <div class="label">👀 someone's in the arena</div>
+    <div class="distract-sub">make them blink — spam an emoji at their screen</div>
+    <div class="emoji-row" id="emoji-row"></div>
   </div>
 
   <div class="panel">
@@ -232,6 +248,7 @@
 <div id="screen-game" class="screen">
   <div class="cam-wrap">
     <video id="cam" autoplay playsinline muted></video>
+    <div class="emoji-layer" id="emoji-layer"></div>
     <div class="chips">
       <span class="chip" id="g-blink">👁 ready</span>
     </div>
@@ -277,9 +294,32 @@ const FPS = 15, SEND_DIM = 480;   // fixed square frame for every player (see se
 
 let token = null, stream = null, sending = false, myName = '';
 
+// must match kEmojiCount on the server (8). Spectators fling these; the player
+// sees them fly across the camera.
+const EMOJIS = ['😂','😝','💀','🔥','👻','🤡','😱','🥹'];
+let seenReact = 0;
+
 function show(screen) {
   for (const s of document.querySelectorAll('.screen')) s.classList.remove('active');
   $(screen).classList.add('active');
+}
+
+// build the spectator emoji buttons once
+$('emoji-row').innerHTML = EMOJIS.map((e, i) =>
+  `<button class="emoji-btn" data-i="${i}">${e}</button>`).join('');
+$('emoji-row').onclick = ev => {
+  const b = ev.target.closest('.emoji-btn');
+  if (b) fetch('/api/react?e=' + b.dataset.i, { method: 'POST' }).catch(() => {});
+};
+
+function flyEmoji(idx) {
+  const span = document.createElement('span');
+  span.className = 'flying';
+  span.textContent = EMOJIS[idx] || '❓';
+  span.style.left = (8 + Math.random() * 78) + '%';
+  span.style.setProperty('--spin', (Math.random() * 80 - 40) + 'deg');
+  $('emoji-layer').appendChild(span);
+  setTimeout(() => span.remove(), 2500);
 }
 
 // ---------- lobby: live state + leaderboard over SSE ----------
@@ -287,13 +327,15 @@ const es = new EventSource('/events');
 es.onmessage = e => {
   const m = JSON.parse(e.data);
 
-  // spectator banner
-  const busy = m.phase !== 'idle' && !token;
-  $('live-banner').style.display = busy ? 'block' : 'none';
-  if (busy) {
-    $('live-name').textContent = m.player;
-    $('live-timer').textContent = m.phase === 'staring' ? m.stare_t.toFixed(1)
-                                : m.phase === 'done' ? m.score.toFixed(1) : '0.0';
+  // spectators get the "distract them" panel while a round is live (no name shown)
+  const live = (m.phase === 'countdown' || m.phase === 'staring') && !token;
+  $('distract').style.display = live ? 'block' : 'none';
+
+  // flying emojis land on the active player's camera
+  if (m.reacts) {
+    for (const [id, idx] of m.reacts) {
+      if (id > seenReact) { seenReact = id; if (token) flyEmoji(idx); }
+    }
   }
 
   renderLeaderboard($('podium'), $('board'), $('lb-range'), m.board);
@@ -385,8 +427,8 @@ async function play() {
       body: JSON.stringify({ name: myName, eyes: $('eyes-ok').checked })
     });
     if (r.status === 409) {
-      const b = await r.json();
-      throw new Error(`${b.player} is mid-stare — wait for them to blink`);
+      await r.json().catch(() => {});
+      throw new Error('someone’s mid-stare — distract them, then try again');
     }
     if (!r.ok) throw new Error('could not join');
     token = (await r.json()).token;

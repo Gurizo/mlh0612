@@ -158,7 +158,16 @@ struct GameState {
                                    // optical-flow tracker crashes if it changes
 
     std::vector<BoardEntry> board;
+
+    // spectator "distract" reactions: emojis flung at the active player. Stored
+    // by index (client maps index -> emoji); ephemeral, only the recent ones
+    // are streamed to the player.
+    struct React { uint64_t id; int idx; double t; };
+    std::deque<React> reacts;
+    uint64_t react_seq = 0;
 };
+
+constexpr int kEmojiCount = 8;  // must match the EMOJIS array in web/index.html
 
 GameState g;
 std::mutex g_feed_mu;  // serializes frame decode-order -> SDK Send (monotonic)
@@ -427,6 +436,7 @@ void ResetToIdleLocked() {
     g.end_reason.clear();
     g.eye_valid = false;
     g.eye_frame.clear();
+    g.reacts.clear();
 }
 
 bool SameName(const std::string& a, const std::string& b) {
@@ -617,7 +627,23 @@ std::string BuildEventJson() {
     const double now = NowSeconds();
     std::lock_guard<std::mutex> lock(g.mu);
     TickLocked(now);
-    return "{" + GameJsonLocked(now) + ",\"board\":" + BoardJsonLocked(10) + "}";
+
+    // recent reactions (last ~3.5s); prune anything older
+    while (!g.reacts.empty() && g.reacts.front().t < now - 4.0) g.reacts.pop_front();
+    std::string reacts = "[";
+    bool first = true;
+    for (const auto& r : g.reacts) {
+        if (r.t < now - 3.5) continue;
+        char buf[48];
+        snprintf(buf, sizeof(buf), "%s[%llu,%d]", first ? "" : ",",
+                 static_cast<unsigned long long>(r.id), r.idx);
+        reacts += buf;
+        first = false;
+    }
+    reacts += "]";
+
+    return "{" + GameJsonLocked(now) + ",\"board\":" + BoardJsonLocked(10) +
+           ",\"reacts\":" + reacts + "}";
 }
 
 }  // namespace
@@ -829,6 +855,20 @@ int main(int argc, char** argv) {
             res.set_content("{\"ok\":true}", "application/json");
         });
     }
+
+    // Spectators fling an emoji (by index) at the active player to distract them.
+    server.Post("/api/react", [](const httplib::Request& req, httplib::Response& res) {
+        const int idx = atoi(req.get_param_value("e").c_str());
+        const double now = NowSeconds();
+        std::lock_guard<std::mutex> lock(g.mu);
+        TickLocked(now);
+        if ((g.phase == Phase::kCountdown || g.phase == Phase::kStaring) &&
+            idx >= 0 && idx < kEmojiCount) {
+            g.reacts.push_back({++g.react_seq, idx, now});
+            while (g.reacts.size() > 60) g.reacts.pop_front();  // safety cap
+        }
+        res.set_content("{\"ok\":1}", "application/json");
+    });
 
     server.Post("/api/leave", [](const httplib::Request& req, httplib::Response& res) {
         const std::string token = req.get_param_value("token");
