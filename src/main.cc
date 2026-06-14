@@ -349,11 +349,15 @@ std::string CropEyesLocked() {
         const int ox = k * (bw + gap);
         for (int y = 0; y < bh; ++y) {
             for (int x = 0; x < bw; ++x) {
-                // feathered elliptical mask
+                // almond/eye-lens mask: the lid height tapers to a point at the
+                // left/right corners, so the crop reads as an eye, not a blob.
                 const double nx = (x + 0.5) / bw * 2 - 1, ny = (y + 0.5) / bh * 2 - 1;
-                const double r2 = nx * nx + ny * ny;
-                if (r2 >= 1.0) continue;
-                const double a = std::min(1.0, (1.0 - r2) * 3.0);
+                const double lid = 1.0 - nx * nx;          // 1 at center -> 0 at corners
+                if (lid <= 0.0) continue;
+                const double edge = std::fabs(ny) / lid;   // 0 at the eye-line, 1 at the lid
+                if (edge >= 1.0) continue;
+                // feather the lids AND the pointed corners for a soft edge
+                const double a = std::min({1.0, (1.0 - edge) * 2.5, lid * 4.0});
                 const uint8_t* src = rgb + (static_cast<size_t>(y0 + y) * w + x0 + x) * 3;
                 uint8_t* dst = out.data() + (static_cast<size_t>(y) * out_w + ox + x) * 4;
                 dst[0] = src[0];
