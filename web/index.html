@@ -168,21 +168,26 @@
   #hint-bar { font-size: 12px; color: var(--warn); text-align: center; margin-top: 8px; min-height: 16px; }
 
   /* spectator "distract" panel + emoji buttons */
-  .distract-sub { font-size: 13px; color: var(--dim); margin: -4px 0 12px; }
+  .distract-head { font-size: 15px; margin: 2px 0 2px; }
+  .distract-head b { color: var(--accent); }
+  .distract-head .t { color: var(--text); font-variant-numeric: tabular-nums; }
+  .distract-sub { font-size: 13px; color: var(--dim); margin: 0 0 12px; }
   .emoji-row { display: flex; flex-wrap: wrap; gap: 8px; }
-  .emoji-btn { flex: 1 1 0; min-width: 56px; font-size: 30px; line-height: 1; padding: 12px 0;
+  .emoji-btn { flex: 1 1 0; min-width: 56px; font-size: 30px; line-height: 1; padding: 14px 0;
     background: var(--panel2); border: 1px solid var(--border); border-radius: 12px; cursor: pointer;
-    transition: transform .08s; }
-  .emoji-btn:active { transform: scale(1.25); border-color: var(--accent); }
+    user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  .emoji-btn.pop { animation: pop .18s ease-out; }
+  @keyframes pop { 0% { transform: scale(1); } 40% { transform: scale(1.35); border-color: var(--accent); } 100% { transform: scale(1); } }
 
-  /* flying emojis over the player's camera */
-  .emoji-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
-  .flying { position: absolute; bottom: -10px; font-size: 44px; will-change: transform, opacity;
-    animation: flyup 2.4s ease-out forwards; }
+  /* flying emojis over the player's camera (bottom% is container-relative, so
+     they actually travel the full height) */
+  .emoji-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 3; }
+  .flying { position: absolute; bottom: 0; font-size: 52px; will-change: bottom, transform, opacity;
+    text-shadow: 0 2px 10px rgba(0,0,0,.5); animation: flyup 2.6s ease-out forwards; }
   @keyframes flyup {
-    0%   { transform: translateY(0) scale(.6) rotate(0deg); opacity: 0; }
-    15%  { opacity: 1; }
-    100% { transform: translateY(-78%) scale(1.4) rotate(var(--spin,20deg)); opacity: 0; }
+    0%   { bottom: 0%;  opacity: 0; transform: scale(.5) rotate(0deg); }
+    12%  { opacity: 1; }
+    100% { bottom: 92%; opacity: 0; transform: scale(1.5) rotate(var(--spin,20deg)); }
   }
 
   /* result */
@@ -220,8 +225,9 @@
 <!-- ============ LOBBY ============ -->
 <div id="screen-lobby" class="screen active">
   <div class="panel" id="distract" style="display:none">
-    <div class="label">👀 someone's in the arena</div>
-    <div class="distract-sub">make them blink — spam an emoji at their screen</div>
+    <div class="label">👀 live now</div>
+    <div class="distract-head"><b id="d-name">someone</b> is staring · <span class="t" id="d-timer">0.0</span>s</div>
+    <div class="distract-sub">make them blink — tap to fling an emoji at their camera</div>
     <div class="emoji-row" id="emoji-row"></div>
   </div>
 
@@ -299,6 +305,18 @@ let token = null, stream = null, sending = false, myName = '';
 const EMOJIS = ['😂','😝','💀','🔥','👻','🤡','😱','🥹'];
 let seenReact = 0;
 
+// spectator's live timer ticks locally too (same trick as the player's)
+let specTimer = null, specAnchorMs = 0;
+function startSpecTimer(serverStareT) {
+  specAnchorMs = performance.now() - serverStareT * 1000;
+  const paint = () => { $('d-timer').textContent = ((performance.now() - specAnchorMs) / 1000).toFixed(1); };
+  paint();
+  specTimer = setInterval(paint, 50);
+}
+function stopSpecTimer() {
+  if (specTimer !== null) { clearInterval(specTimer); specTimer = null; }
+}
+
 function show(screen) {
   for (const s of document.querySelectorAll('.screen')) s.classList.remove('active');
   $(screen).classList.add('active');
@@ -306,20 +324,26 @@ function show(screen) {
 
 // build the spectator emoji buttons once
 $('emoji-row').innerHTML = EMOJIS.map((e, i) =>
-  `<button class="emoji-btn" data-i="${i}">${e}</button>`).join('');
-$('emoji-row').onclick = ev => {
+  `<button class="emoji-btn" type="button" data-i="${i}">${e}</button>`).join('');
+// fire on pointerdown (snappier than click on touch) with a visible pop + haptic
+function fling(b) {
+  b.classList.remove('pop'); void b.offsetWidth; b.classList.add('pop');  // restart the pop anim
+  if (navigator.vibrate) navigator.vibrate(15);
+  fetch('/api/react?e=' + b.dataset.i, { method: 'POST' }).catch(() => {});
+}
+$('emoji-row').addEventListener('pointerdown', ev => {
   const b = ev.target.closest('.emoji-btn');
-  if (b) fetch('/api/react?e=' + b.dataset.i, { method: 'POST' }).catch(() => {});
-};
+  if (b) { ev.preventDefault(); fling(b); }
+});
 
 function flyEmoji(idx) {
   const span = document.createElement('span');
   span.className = 'flying';
   span.textContent = EMOJIS[idx] || '❓';
-  span.style.left = (8 + Math.random() * 78) + '%';
-  span.style.setProperty('--spin', (Math.random() * 80 - 40) + 'deg');
+  span.style.left = (6 + Math.random() * 80) + '%';
+  span.style.setProperty('--spin', (Math.random() * 100 - 50) + 'deg');
   $('emoji-layer').appendChild(span);
-  setTimeout(() => span.remove(), 2500);
+  setTimeout(() => span.remove(), 2700);
 }
 
 // ---------- lobby: live state + leaderboard over SSE ----------
@@ -327,9 +351,20 @@ const es = new EventSource('/events');
 es.onmessage = e => {
   const m = JSON.parse(e.data);
 
-  // spectators get the "distract them" panel while a round is live (no name shown)
+  // spectators get the "distract them" panel while a round is live
   const live = (m.phase === 'countdown' || m.phase === 'staring') && !token;
   $('distract').style.display = live ? 'block' : 'none';
+  if (live) {
+    $('d-name').textContent = m.player || 'someone';
+    if (m.phase === 'staring') {
+      if (specTimer === null) startSpecTimer(m.stare_t);   // smooth local count
+    } else {
+      stopSpecTimer();
+      $('d-timer').textContent = m.countdown > 0 ? '0.0' : '…';  // counting down to start
+    }
+  } else {
+    stopSpecTimer();
+  }
 
   // flying emojis land on the active player's camera
   if (m.reacts) {
@@ -427,8 +462,8 @@ async function play() {
       body: JSON.stringify({ name: myName, eyes: $('eyes-ok').checked })
     });
     if (r.status === 409) {
-      await r.json().catch(() => {});
-      throw new Error('someone’s mid-stare — distract them, then try again');
+      const b = await r.json().catch(() => ({}));
+      throw new Error(`${b.player || 'someone'} is mid-stare — distract them, then try again`);
     }
     if (!r.ok) throw new Error('could not join');
     token = (await r.json()).token;
