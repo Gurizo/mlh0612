@@ -406,11 +406,7 @@ std::string CropEyesLocked() {
 // SDK delivers a dense (>=468 point) mesh; sparser meshes fall back to two
 // boxes placed heuristically inside the whole-landmark bounding box.
 //
-// `open` gates the capture: we only snapshot the avatar frame when the eyes are
-// open, so the profile shows open eyes (the round ends on a blink, so the very
-// last frame is always shut). On a blink we keep the previous open-eyed frame.
-void UpdateEyeBoxFromLandmarks(const spectra::Metrics& m, double now, bool open) {
-    if (!open) return;
+void UpdateEyeBoxFromLandmarks(const spectra::Metrics& m, double now) {
     if (!m.has_face() || m.face().landmarks_size() == 0) return;
     const auto& lm = m.face().landmarks(m.face().landmarks_size() - 1);
     const int n = lm.value_size();
@@ -612,14 +608,16 @@ void OnMetrics(const spectra::Metrics& m, int64_t /*timestamp_us*/) {
         open = !m.face().blinking(m.face().blinking_size() - 1).detected();
     }
 
-    // Capture the avatar EARLY and freeze it: during countdown and the first
-    // second of staring, eyes are open and settled. The round always ends on a
-    // blink, so tracking up to the end grabs shut eyes (and the SDK's blink flag
-    // lags the actual closure). Once we have a capture and ~1s of staring has
-    // passed, stop overwriting.
-    const bool capturing = g.phase == Phase::kCountdown ||
-        (g.phase == Phase::kStaring && (now - g.stare_start <= 1.0 || !g.eye_valid));
-    if (capturing) UpdateEyeBoxFromLandmarks(m, now, open);
+    // Capture the avatar EARLY in the stare and freeze it. During staring the
+    // eyes are open by definition (a blink ends the round), so a frame ~1s in is
+    // guaranteed open — far more reliable than gating on the SDK's blink flag,
+    // which lags the actual closure and left us with shut-eye profiles. We
+    // overwrite through the first ~1.5s, then freeze; if detection was late and
+    // we still have nothing, keep trying (open-gated to skip a blink frame).
+    if (g.phase == Phase::kStaring) {
+        const double t = now - g.stare_start;
+        if (t < 1.5 || (!g.eye_valid && open)) UpdateEyeBoxFromLandmarks(m, now);
+    }
 
     // blinks: rising edges of the per-frame detection flag end the round
     if (m.has_face() && m.face().blinking_size() > 0) {
