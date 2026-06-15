@@ -86,6 +86,31 @@ std::string JsonEscape(const std::string& in) {
     return out;
 }
 
+// Basic profanity/slur filter for player names. Normalizes leetspeak and keeps
+// only letters, then checks for banned substrings. Not exhaustive, but it
+// catches the obvious stuff on a public leaderboard.
+bool NameIsInappropriate(const std::string& raw) {
+    std::string s;
+    for (char c : raw) {
+        char l = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        switch (l) {
+            case '0': l = 'o'; break; case '1': l = 'i'; break; case '3': l = 'e'; break;
+            case '4': l = 'a'; break; case '5': l = 's'; break; case '7': l = 't'; break;
+            case '@': l = 'a'; break; case '$': l = 's'; break; case '!': l = 'i'; break;
+        }
+        if (l >= 'a' && l <= 'z') s += l;
+    }
+    static const char* kBanned[] = {
+        "fuck", "shit", "bitch", "cunt", "pussy", "asshole", "whore", "slut",
+        "faggot", "nigger", "nigga", "retard", "rapist", "molest", "nazi",
+        "hitler", "kkk", "dildo", "blowjob", "handjob", "cumshot", "jizz", "coon",
+    };
+    for (const char* w : kBanned) {
+        if (s.find(w) != std::string::npos) return true;
+    }
+    return false;
+}
+
 struct BoardEntry {
     std::string name;
     double score = 0;     // best staring time, seconds
@@ -587,10 +612,14 @@ void OnMetrics(const spectra::Metrics& m, int64_t /*timestamp_us*/) {
         open = !m.face().blinking(m.face().blinking_size() - 1).detected();
     }
 
-    // eye region for the avatar crop (only captured while eyes are open)
-    if (g.phase == Phase::kCountdown || g.phase == Phase::kStaring) {
-        UpdateEyeBoxFromLandmarks(m, now, open);
-    }
+    // Capture the avatar EARLY and freeze it: during countdown and the first
+    // second of staring, eyes are open and settled. The round always ends on a
+    // blink, so tracking up to the end grabs shut eyes (and the SDK's blink flag
+    // lags the actual closure). Once we have a capture and ~1s of staring has
+    // passed, stop overwriting.
+    const bool capturing = g.phase == Phase::kCountdown ||
+        (g.phase == Phase::kStaring && (now - g.stare_start <= 1.0 || !g.eye_valid));
+    if (capturing) UpdateEyeBoxFromLandmarks(m, now, open);
 
     // blinks: rising edges of the per-frame detection flag end the round
     if (m.has_face() && m.face().blinking_size() > 0) {
@@ -755,6 +784,7 @@ int main(int argc, char** argv) {
                                   [](char c) { return c == '{' || c == '}'; }),
                    name.end());
         if (name.empty()) name = "anonymous";
+        if (NameIsInappropriate(name)) name = "ShyGazer";  // keep the board clean
         const bool want_eyes = req.body.find("\"eyes\":false") == std::string::npos;
 
         const double now = NowSeconds();
